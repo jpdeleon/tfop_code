@@ -1,0 +1,2120 @@
+#!/usr/bin/env python
+"""
+Written by J.P. de Leon based on 
+TFOP analysis code by A. Fukui.
+
+User-friedly features include: 
+* easy to fetch TFOP parameters
+* handles any number of bands
+* easy to switch between models
+  - achromatic & chromatic
+  - specifying covariates (default=Airmass)
+  - polynomial order of linear model (default=1)
+* shows useful plots: quicklook, raw data, posteriors, FOV, FOV with gaia sources, etc
+* implements new parameterization for efficient sampling of impact parameter and Rp/Rs 
+  (Espinosa+2018: https://iopscience.iop.org/article/10.3847/2515-5172/aaef38)
+
+Note:
+* To re-define the priors, manually edit `get_chi2_chromatic_transit` method within `LPF` class
+
+TODO
+* use other optimizers e.g. PSO
+    - https://github.com/ljvmiranda921/pyswarms?tab=readme-ov-file    
+* parallelize for faster chi2 evaluation within mcmc
+"""
+import os, sys, json
+from typing import Dict, Tuple, List
+from urllib.request import urlopen
+from datetime import datetime
+from pathlib import Path
+from dataclasses import dataclass, field
+from multiprocessing import Pool
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.ticker import AutoMinorLocator
+import pandas as pd
+from scipy.optimize import minimize
+from astropy.io import fits
+from astropy.visualization import ZScaleInterval, ImageNormalize
+from astropy.wcs import WCS
+import astropy.units as u
+from astropy.visualization.wcsaxes import SphericalCircle  # , add_scalebar
+from astropy.coordinates import SkyCoord
+from astroquery.mast import Catalogs
+from aesthetic.plot import savefig
+
+# from numba import jit
+import emcee
+import corner
+from tqdm.autonotebook import tqdm
+from pytransit import QuadraticModel
+from ldtk import LDPSetCreator, BoxcarFilter
+from aesthetic.plot import set_style, savefig
+
+# set_style("science")
+# sys.path.insert(0, "/ut3/muscat/src/AFPy")
+# import LC_funcs as lc
+
+import seaborn as sb
+
+sb.set(
+    context="paper",
+    style="ticks",
+    palette="deep",
+    font="sans-serif",
+    font_scale=1.5,
+    color_codes=True,
+)
+sb.set_style({"xtick.direction": "in", "ytick.direction": "in"})
+sb.set_context(rc={"lines.markeredgewidth": 1})
+plt.rcParams["font.size"] = 26
+
+os.environ["OMP_NUM_THREADS"] = "1"
+os.nice(19)
+
+PRIOR_K_MIN = 0.01
+PRIOR_K_MAX = 1.0
+
+# bandpasses in increasing wavelength
+filter_widths = {
+    "g": (430, 540),
+    "r": (560, 700),
+    "i": (700, 820),
+    "z": (830, 910),
+}
+bands = list(filter_widths.keys())
+colors = {
+    "g": "blue",
+    "r": "green",
+    "i": "darkorange",
+    "z": "red",
+}
+
+@dataclass
+class LPF:
+    name: str
+    ticid: str
+    date: str
+    data: Dict = field(repr=False)
+    star_params: Dict[str, Tuple[float, float]] = field(repr=False)
+    planet_params: Dict[str, Tuple[float, float]] = field(repr=False)
+    inst: str = "MuSCAT"
+    alias: str = ".01"
+    bands: List[str] = None
+    model: str = "chromatic"
+    time_offset: float = None
+    covariate: str = "Airmass"
+    lm_order: int = 1
+    mask_start: float = None
+    mask_end: float = None
+    outdir: str = "results"
+    use_r1r2: bool = False
+    DEBUG: bool = field(repr=False, default=False)
+
+    def __post_init__(self):
+        # super().__post_init__()
+        self._validate_inputs()
+        self._init_data()
+        self._init_params()
+        self._init_ldc()
+        self.date4plot = datetime.strptime(self.date, "%y%m%d").strftime(
+            "%Y-%b-%d UT"
+        )
+        if not Path(self.outdir).exists():
+            Path(self.outdir).mkdir()
+        self.outfile_prefix = f"{self.ticid}{self.alias}_20{self.date}"
+        self.outfile_prefix += f"_{self.inst}_{''.join(self.bands)}_{self.model}"
+        self._mcmc_samples = None
+
+    def _validate_inputs(self):
+        """Make sure inputs are correct"""
+        assert isinstance(self.data, dict), "data must be a dict"
+        b = list(self.data.keys())[0]
+        errmsg = "each item of data must be a pd.DataFrame"
+        assert isinstance(self.data[b], pd.DataFrame), errmsg
+
+        # sort data in griz order
+        self.data = dict(
+            sorted(self.data.items(), key=lambda x: bands.index(x[0]))
+        )
+        self.obs_start = min(
+            [self.data[b]["BJD_TDB"].min() for b in self.data]
+        )
+        self.obs_end = max([self.data[b]["BJD_TDB"].max() for b in self.data])
+        self.bands = (
+            list(self.data.keys()) if self.bands is None else self.bands
+        )
+        errmsg = f"`bands` can only use the given keys in `data`: {self.data.keys()}"
+        assert len(self.bands) <= len(self.data.keys()), errmsg
+        for b in self.bands:
+            errmsg = f"{b} not in `data` keys: {self.data.keys()}"
+            assert b in self.data.keys(), errmsg
+        self.nband = len(self.bands)
+
+        assert isinstance(self.star_params, dict)
+        assert isinstance(self.planet_params, dict)
+        assert (
+            np.array(self.planet_params["tdur"]) < 1
+        ).all(), "`tdur` must be in days"
+        assert (np.array(self.planet_params["rprs"]) < 1).all(), "Check `rprs`"
+        assert self.planet_params["a_Rs"][0] > 1, "`a/Rs` is <1?"
+
+        errmsg = f"{self.covariate} not in {self.data[b].columns}"
+        assert self.covariate in self.data[b].columns, errmsg
+
+        if np.all([self.mask_start, self.mask_end]):
+            errmsg = f"{self.mask_start} is too early. Try {self.obs_start}"
+            assert self.mask_start >= self.obs_start, errmsg
+            errmsg = f"{self.mask_end} is too late. Try {self.obs_end}"
+            assert self.mask_end <= self.obs_end, errmsg
+            tdiff = (self.mask_end - self.mask_start) * 60 * 24
+            print(f"Masking {tdiff:.1f} min of data.")
+
+        if self.time_offset is None:
+            if self.obs_start > 2_450_000:
+                self.time_offset = 2_450_000
+            else:
+                self.time_offset = np.floor(self.obs_start)
+        errmsg = (
+            f"`time_offset` is too big. Observation ended at {self.obs_end}."
+        )
+        assert self.time_offset < self.obs_end, errmsg
+
+        # update times
+        self.obs_start -= self.time_offset
+        self.obs_end -= self.time_offset
+
+        self.teff = self.star_params["teff"]
+        self.logg = self.star_params["logg"]
+        self.feh = self.star_params["feh"]
+
+        models = ["achromatic", "chromatic"]
+        errmsg = f"model is either {' or '.join(models)}"
+        assert self.model in models, errmsg
+
+        # if np.all([self.ingress, self.egress]):
+        #     assert (self.ingress-self.time_offset-self.obs_start)<0
+        #     assert (self.egress-self.time_offset-self.obs_end)>0
+
+        if self.DEBUG:
+            print("==========")
+            print("DEBUG MODE")
+            print("==========")
+            print("obs_start", self.obs_start)
+            print("obs_end", self.obs_end)
+            print("bands", self.bands)
+            print("nband", self.nband)
+            print("time_offset", self.time_offset)
+
+    def _init_data(self):
+        """initialize user-given photometry data"""
+        self.masks = {}
+        self.times_raw = {}
+        self.fluxes_raw = {}
+        self.flux_errs_raw = {}
+        self.covariates_raw = {}
+        self.times = {}
+        self.fluxes = {}
+        self.flux_errs = {}
+        self.covariates = {}
+        self.transit_models = {}
+        self.lin_model_offsets = {b: 0 for b in self.bands}
+
+        for b in self.bands:
+            df = self.data[b]
+            t = df["BJD_TDB"].values - self.time_offset
+            f = df["Flux"].values
+            e = df["Err"].values
+            z = df[self.covariate].values
+            self.times_raw[b] = t + self.time_offset
+            self.fluxes_raw[b] = f
+            self.flux_errs_raw[b] = e
+            self.covariates_raw[b] = z
+            m1 = np.zeros_like(t, dtype=bool)
+            m2 = np.zeros_like(t, dtype=bool)
+            if self.mask_start:
+                m1 = t >= self.mask_start - self.time_offset
+            if self.mask_end:
+                m2 = t <= self.mask_end - self.time_offset
+            mask = m1 & m2
+            if sum(mask) > 0:
+                print(f"Masked {sum(mask)} data points in {b}-band.")
+            self.masks[b] = m1 & m2
+            self.times[b] = t[~mask]
+            self.fluxes[b] = f[~mask]
+            self.flux_errs[b] = e[~mask]
+            self.covariates[b] = z[~mask]
+            self.transit_models[b] = QuadraticModel()
+            self.transit_models[b].set_data(t[~mask])
+        self.ndata = sum([len(self.times[b]) for b in self.bands])
+
+    def _init_params(self, return_dict=False):
+        """initialize parameters of the model"""
+        self.period = self.planet_params["period"]
+        self.tdur = self.planet_params["tdur"]
+        tc0 = self.planet_params["t0"]
+        tc, tc_err = tc0[0] - self.time_offset, tc0[1]
+
+        # obs_mid = self.obs_end - self.obs_start
+        b = self.bands[0]
+        int_tc = int(self.times[b][0])
+        if abs(tc - int_tc) > 1:
+            print(f"Input t0: {tc0}")
+            # self.norbits = np.floor((int_tc-tc)/self.period[0])
+            self.norbits = int(
+                (np.median(self.times[b]) - tc + 0.3) / self.period[0]
+            )
+            tc = tc + self.period[0] * self.norbits
+            tc_err = np.sqrt(tc_err**2 + (self.period[1] * self.norbits) ** 2)
+            print(f"Shifted t0: ({tc+self.time_offset}, {tc_err})")
+            print(f"Shifted by {self.norbits} periods.")
+        errmsg = f"{self.obs_start:.6f}<{tc:.6f}<{self.obs_end:.6f}"
+        assert tc > self.obs_start and tc < self.obs_end, errmsg
+        self.tc = (tc, tc_err)
+        self.ingress = np.array(self.tc) - self.tdur[0] / 2
+        self.egress = np.array(self.tc) + self.tdur[0] / 2
+
+        if self.use_r1r2:
+            imp = self.planet_params.get("imp", (0, 0.1))
+            k = self.planet_params["rprs"]
+            r1, r2 = imp_k_to_r1r2(
+                imp[0], k[0], k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
+            )
+            r1_err, r2_err = imp_k_to_r1r2(
+                imp[1], k[1], k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
+            )
+            params = {
+                "tc": self.tc,
+                "a_Rs": self.planet_params["a_Rs"],
+                "r1": (r1, r1_err),  # optional
+            }
+            self.k_idx = len(params)
+            if self.model == "chromatic":
+                params.update({"r2_" + b: (r2, r2_err) for b in self.bands})
+            else:
+                params.update({"r2": (r2, r2_err)})
+        else:
+            params = {
+                "tc": self.tc,
+                "a_Rs": self.planet_params["a_Rs"],
+                "imp": self.planet_params.get("imp", (0, 0.1)),  # optional
+            }
+            self.k_idx = len(params)
+            if self.model == "chromatic":
+                params.update(
+                    {"k_" + b: self.planet_params["rprs"] for b in self.bands}
+                )
+            elif self.model == "achromatic":
+                params.update({"k": self.planet_params["rprs"]})
+        self.d_idx = len(params)
+        params.update(
+            {"d_" + b: (self.lin_model_offsets[b], 0) for b in self.bands}
+        )
+        self.model_param_names = list(params.keys())
+        self.ndim = len(params)
+        self.model_params = params
+        return params if return_dict else [v[0] for k, v in params.items()]
+
+    def _init_ldc(self):
+        """initialize quadratic limb-darkening coefficients"""
+        self.ldc = {}
+        self.ldtk_filters = [
+            BoxcarFilter(b, *filter_widths[b]) for b in self.bands
+        ]
+        sc = LDPSetCreator(
+            teff=self.teff,
+            logg=self.logg,
+            z=self.feh,
+            filters=self.ldtk_filters,
+        )
+        # Create the limb darkening profiles
+        ps = sc.create_profiles()
+        # Estimate quadratic law coefficients
+        cq, eq = ps.coeffs_qd(do_mc=True)
+        qc, qe = ps.coeffs_qd()
+        for i, b in enumerate(ps._filters):
+            if self.DEBUG:
+                print(
+                    f"{ps._filters[i]}: q1,q2=({qc[i][0]:.2f}, {qc[i][1]:.2f})"
+                )
+            self.ldc[b] = (qc[i][0], qc[i][1])
+
+    def get_chi2_linear_baseline(self, p0):
+        """
+        p0 : list
+            parameter vector
+
+        chi2 of linear baseline model
+        """
+        int_t0 = self.obs_start
+        chi2 = 0.0
+        for i, b in enumerate(self.bands):
+            flux_time = p0[i] * (self.times[b] - int_t0)
+            c = np.polyfit(
+                self.covariates[b], self.fluxes[b] - flux_time, self.lm_order
+            )
+            linear_model = np.polyval(c, self.covariates[b])
+            chi2 += np.sum(
+                (self.fluxes[b] - linear_model + flux_time) ** 2
+                / self.flux_errs[b] ** 2
+            )
+        return chi2
+
+    def optimize_chi2_linear_baseline(self, p0=None, repeat=1):
+        """
+        p0 : list
+            parameter vector
+        """
+        p0 = list(self.lin_model_offsets.values()) if p0 is None else p0
+        assert len(p0) == self.nband
+        for i in range(repeat):
+            p = p0 if i == 0 else res_lin.x
+            res_lin = minimize(
+                self.get_chi2_linear_baseline, p, method="Nelder-Mead"
+            )
+            print(res_lin.fun, res_lin.success, res_lin.x)
+
+        npar_lin = len(res_lin.x)
+        # print('npar(linear) = ', npar_lin)
+        self.bic_lin = res_lin.fun + npar_lin * np.log(self.ndata)
+        # print('BIC(linear) = ', self.bic_lin)
+        self.lin_model_offsets = {
+            b: res_lin.x[i] for i, b in enumerate(self.bands)
+        }
+
+    def unpack_parameters(self, pv):
+        """
+        pv : list
+            parameter vector from MCMC or optimization
+
+        Unpack commonly used parameters for transit and systematics models
+        """
+        assert len(pv) == self.ndim
+        tc, a_Rs, imp = pv[: self.k_idx]
+        if self.model == "chromatic":
+            k = np.array([pv[self.k_idx + i] for i in range(self.nband)])
+        elif self.model == "achromatic":
+            k = np.zeros(self.nband) + pv[self.k_idx]
+        d = np.array(pv[self.d_idx : self.d_idx + self.nband])
+        return tc, a_Rs, imp, k, d
+
+    def get_chi2_chromatic_transit(self, pv):
+        """
+        fixed parameters
+        ----------------
+        period : fixed
+
+        free parameters
+        ---------------
+        tc : mid-transit
+        imp : impact parameter
+        a_Rs : scaled semi-major axis
+        k : radius ratio = Rp/Rs
+        d : linear model coefficients
+
+        TODO: add argument to set (normal) priors on Tc, Tdur, and a_Rs
+        """
+        # unpack fixed parameters
+        per = self.period[0]
+        # unpack free parameters
+        if self.use_r1r2:
+            tc, a_Rs, r1, r2, d = self.unpack_parameters(pv)
+            imp, k = r1r2_to_imp_k(r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX)
+
+            # uniform priors
+            if (r1 < 0.0) or (r1 > 1.0):
+                if self.DEBUG:
+                    print(f"Error (r1): 0<{r1:.2f}<1")
+                return np.inf
+            if np.any(r2 < 0.0) or np.any(r2 > 1.0):
+                if self.DEBUG:
+                    print(f"Error (r2): 0<{r2}<1")
+                return np.inf
+        else:
+            # use imp and k
+            tc, a_Rs, imp, k, d = self.unpack_parameters(pv)
+
+            # uniform priors
+            if np.any(k < PRIOR_K_MIN):
+                if self.DEBUG:
+                    print(f"Error (k_min): {k:.2f}<{PRIOR_K_MIN}")
+                    print(
+                        f"You may need to decrease PRIOR_K_MIN={PRIOR_K_MIN}"
+                    )
+                return np.inf
+            if np.any(k > PRIOR_K_MAX):
+                if self.DEBUG:
+                    print(f"Error (k_max): {k:.2f}>{PRIOR_K_MAX}")
+                    print(
+                        f"You may need to increase PRIOR_K_MAX={PRIOR_K_MAX}"
+                    )
+                return np.inf
+            if (imp < 0.0) or (imp > 1.0):
+                if self.DEBUG:
+                    print(f"Error (imp): 0<{imp:.2f}<1")
+                return np.inf
+
+        # derived
+        inc = np.arccos(imp / a_Rs)
+        tdur = tdur_from_per_imp_aRs_k(per, imp, a_Rs, np.mean(k))
+
+        if a_Rs <= 0.0:
+            if self.DEBUG:
+                print(f"Error (a_Rs): {a_Rs:.2f}<0")
+            return np.inf
+        if imp / a_Rs >= 1.0:
+            if self.DEBUG:
+                print(f"Error (imp/a_Rs): {imp:.2f}/{a_Rs:.2f}>1")
+            return np.inf
+        # assumes transit occurs within window
+        if (tc < self.obs_start) or (tc > self.obs_end):
+            if self.DEBUG:
+                print(
+                    f"Error (tc outside data): {self.obs_start:.4f}>{tc:.4f}>{self.obs_start:.4f}"
+                )
+            return np.inf
+        # tc shouldn't be more or less than half a period
+        if (tc > 0.0) and (abs(tc - self.obs_start) > per / 2.0):
+            if self.DEBUG:
+                print(
+                    f"Error (tc more than half of period): {tc}-{self.obs_start:.4f} > {per/2:.4f}"
+                )
+            return np.inf
+        chi2 = 0.0
+        for i, b in enumerate(self.bands):
+            t = self.times[b]
+            f = self.fluxes[b]
+            e = self.flux_errs[b]
+            z = self.covariates[b]
+            flux_tr = self.transit_models[b].evaluate_ps(
+                k[i], self.ldc[b], tc, per, a_Rs, inc, e=0, w=0
+            )
+            flux_tr_time = d[i] * (t - tc) * flux_tr
+            c = np.polyfit(z, (f - flux_tr_time) / flux_tr, self.lm_order)
+            trend = np.polyval(c, z) + d[i] * (t - tc)
+            model = trend * flux_tr
+            chi2 = chi2 + np.sum((f - model) ** 2 / e**2)
+        # add normal priors
+        # if tc > 0.:
+        #     chi2 += ((tc - self.tc[0])/self.tc[1])**2
+        # if a_Rs > 0.:
+        #     chi2 += ((a_Rs - self.planet_params['a_Rs'][0])/self.planet_params['a_Rs'][1])**2
+        if tdur > 0.0:
+            chi2 += ((tdur - self.tdur[0]) / self.tdur[1]) ** 2
+        return chi2
+
+    def neg_loglikelihood(self, pv):
+        return -self.get_chi2_chromatic_transit(pv)
+
+    def optimize_chromatic_transit(self, p0, method="Nelder-Mead"):
+        """
+        Optimize parameters using `scipy.minimize`
+        Uses previous optimized parameters if run again
+        """
+        if hasattr(self, "opt_result"):
+            pv = self.opt_result.x
+        else:
+            assert len(p0) == self.ndim
+            pv = p0
+
+        self.opt_result = minimize(
+            self.get_chi2_chromatic_transit, pv, method=method
+        )
+        if self.opt_result.success:
+            print("Optimization successful!")
+            print("---------------------")
+            print("Optimized parameters:")
+            for n, i in zip(self.model_param_names, self.opt_result.x):
+                print(f"{n}: {i:.2f}")
+            self.optimum_params = self.opt_result.x
+        else:
+            print("Caution: Optimization **NOT** successful!")
+
+    def sample_mcmc(self, pv=None, nsteps=1_000, nwalkers=None):
+        """
+        pv : list
+            parameter vector (uses optimized values if None)
+        """
+        if self.DEBUG:
+            print("Setting DEBUG=False.")
+            self.DEBUG = False
+        self.nwalkers = 10 * self.ndim if nwalkers is None else nwalkers
+        # if hasattr(self, 'sampler'):
+        #     params = self.sampler
+        self.nsteps = nsteps
+        params = self.optimum_params if pv is None else pv
+        assert len(params) == self.ndim
+        pos = [
+            params + 1e-5 * np.random.randn(self.ndim)
+            for i in range(self.nwalkers)
+        ]
+        with Pool(self.ndim) as pool:
+            self.sampler = emcee.EnsembleSampler(
+                self.nwalkers, self.ndim, self.neg_loglikelihood, pool=pool
+            )
+            state = self.sampler.run_mcmc(pos, self.nsteps // 2, progress=True)
+            # if reset:
+            self.sampler.reset()
+            self.sampler.run_mcmc(state, self.nsteps, progress=True)
+
+        # Extract and analyze the results
+        self.analyze_mcmc_results()
+
+    def analyze_mcmc_results(self):
+        log_prob = self.sampler.get_log_prob()
+        argmax = np.argmax(log_prob)
+        self.best_fit_params = self.sampler.flatchain[argmax]
+        # compute bic
+        j = int(argmax / self.nwalkers)
+        i = argmax - self.nwalkers * j
+        self.chi2_best = -log_prob[j, i]
+        # print(chi2_best)
+        npar_tr = len(self.best_fit_params)  # +4
+        # print('ndata = ', self.ndata)
+        # print('npar(transit+linear) = ', npar_tr)
+        self.bic = self.chi2_best + npar_tr * np.log(self.ndata)
+        # print('BIC(transit+linear) = ', bic_tr)
+        if not hasattr(self, "bic_lin"):
+            self.optimize_chi2_linear_baseline()
+        self.bic_delta = self.bic_lin - self.bic
+        # print('delta_BIC = ', delta_bic)
+
+    def get_mcmc_samples(self, discard=1, thin=1):
+        """
+        samples are converted from r1,r2 to imp and k
+        """
+        # FIXME: using get_chain() overwrites the chain somehow!
+        # fc = self.sampler.get_chain(flat=True, discard=discard, thin=thin).copy()
+        if hasattr(self, "mcmc_samples"):
+            fc = self.sampler.flatchain.copy()
+            names = self.model_param_names.copy()
+            fc = fc.reshape(self.nsteps, self.nwalkers, -1)
+            fc = fc[discard::thin].reshape(-1, self.ndim)
+            df = pd.DataFrame(fc, columns=self.model_param_names)
+            df["tc"] = df["tc"] + self.time_offset
+            if self.use_r1r2:
+                print("Converting r1,r2 --> imp,k")
+                r1s = df["r1"].values
+                if self.model == "chromatic":
+                    for b in self.bands:
+                        col = f"r2_{b}"
+                        r2s = df[col].values
+                        imps = np.zeros_like(r1s)
+                        ks = np.zeros_like(r1s)
+                        for i, (r1, r2) in enumerate(zip(r1s, r2s)):
+                            imps[i], ks[i] = r1r2_to_imp_k(
+                                r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
+                            )
+                        df[f"k_{b}"] = ks
+                        df = df.drop(labels=col, axis=1)
+                else:
+                    col = "r2"
+                    r2s = df[col].values
+                    imps = np.zeros_like(r1s)
+                    ks = np.zeros_like(r1s)
+                    for i, (r1, r2) in enumerate(zip(r1s, r2s)):
+                        imps[i], ks[i] = r1r2_to_imp_k(
+                            r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
+                        )
+                    df["k"] = ks
+                    df = df.drop(labels=col, axis=1)
+                df["imp"] = imps
+                names = [s.replace("r1", "imp") for s in names]
+                names = [s.replace("r2", "k") for s in names]
+            self._mcmc_samples = df[names]
+            return df[names]
+        else:
+            return self.mcmc_samples[discard::thin]
+
+    @property
+    def mcmc_samples(self):
+        return self._mcmc_samples
+
+    def get_upsampled_transit_models(self, pv, npoints=200):
+        """
+        pv : list
+            parameter vector from MCMC or optimization
+
+        returns a dict = {band: (time,flux_transit)}
+        """
+        assert len(pv) == self.ndim
+        # unpack fixed parameters
+        per = self.period[0]
+        # unpack free parameters
+        if self.use_r1r2:
+            tc, a_Rs, r1, r2, d = self.unpack_parameters(pv)
+            imp, k = r1r2_to_imp_k(r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX)
+        else:
+            tc, a_Rs, imp, k, d = self.unpack_parameters(pv)
+        # derived
+        inc = np.arccos(imp / a_Rs)
+
+        models = {}
+        for i, b in enumerate(self.bands):
+            t = self.times[b]
+            xmodel = np.linspace(np.min(t), np.max(t), npoints)
+            tmodel = QuadraticModel()
+            tmodel.set_data(xmodel)
+            ymodel = tmodel.evaluate_ps(
+                k[i], self.ldc[b], tc, per, a_Rs, inc, e=0, w=0
+            )
+            models[b] = (xmodel, ymodel)
+        return models
+
+    def get_trend_models(self, pv):
+        """
+        pv : list
+            parameter vector from MCMC or optimization
+
+        returns a dict {band: (time,flux_transit)}
+        """
+        assert len(pv) == self.ndim
+        # unpack fixed parameters
+        per = self.period[0]
+        # unpack free parameters
+        if self.use_r1r2:
+            tc, a_Rs, r1, r2, d = self.unpack_parameters(pv)
+            imp, k = r1r2_to_imp_k(r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX)
+        else:
+            tc, a_Rs, imp, k, d = self.unpack_parameters(pv)
+        # derived
+        inc = np.arccos(imp / a_Rs)
+
+        models = {}
+        for i, b in enumerate(self.bands):
+            t = self.times[b]
+            f = self.fluxes[b]
+            z = self.covariates[b]
+
+            flux_tr = self.transit_models[b].evaluate_ps(
+                k[i], self.ldc[b], tc, per, a_Rs, inc, e=0, w=0
+            )
+            flux_tr_time = d[i] * (t - tc) * flux_tr
+            c = np.polyfit(z, (f - flux_tr_time) / flux_tr, self.lm_order)
+            trend = np.polyval(c, z) + d[i] * (t - tc)
+            models[b] = trend
+        return models
+    
+    def plot_raw_data(self, binsize=600 / 86400, figsize=None, ylims=None):
+        figsize = (10, 10) if figsize is None else figsize
+        fig = plt.figure(figsize=figsize)
+        ncol = 2 if self.nband > 1 else 1
+        nrow = 2 if self.nband > 2 else 1
+        for i, b in enumerate(self.bands):
+            t0 = np.min(self.fluxes[b])
+            ax = fig.add_subplot(ncol, nrow, i + 1)
+            ax.plot(
+                self.times_raw[b] - self.time_offset,
+                self.fluxes_raw[b],
+                "k.",
+                alpha=0.1,
+                label="raw data",
+            )
+            tbin, ybin, yebin = lc.binning_equal_interval(
+                self.times[b], self.fluxes[b], self.flux_errs[b], binsize, t0
+            )
+            ax.errorbar(tbin, ybin, yerr=yebin, marker="o", c=colors[b], ls="")
+            if self.mask_start or self.mask_end:
+                mask = self.masks[b]
+                ax.plot(
+                    self.times_raw[b][mask] - self.time_offset,
+                    self.fluxes_raw[b][mask],
+                    "k.",
+                    label="masked data",
+                )
+            ax.set_title(f"{b}-band")
+            if ylims:
+                ax.set_ylim(*ylims)
+        ax.legend()
+        return fig
+
+    def plot_lightcurves(
+        self, pv, binsize=600 / 86400, ylims=None, figsize=None
+    ):
+        """
+        pv : list
+            parameter vector from MCMC or optimization
+
+        Raw and detrended lightcurves using `pv`
+
+        See also `plot_detrended_data_and_transit()`
+        """
+        figsize = (8, 5) if figsize is None else figsize
+        assert len(pv) == self.ndim
+        # unpack fixed parameters
+        per = self.period[0]
+        # unpack free parameters
+        if self.use_r1r2:
+            tc, a_Rs, r1, r2, d = self.unpack_parameters(pv)
+            imp, k = r1r2_to_imp_k(r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX)
+        else:
+            tc, a_Rs, imp, k, d = self.unpack_parameters(pv)
+        # derived
+        inc = np.arccos(imp / a_Rs)
+        depth = self.planet_params["rprs"][0] ** 2
+
+        trends = self.get_trend_models(pv)
+        transits = self.get_upsampled_transit_models(pv)
+        for i, b in enumerate(self.bands):
+            fig, ax = plt.subplots(1, 2, sharey=True, figsize=figsize)
+            t = self.times[b]
+            f = self.fluxes[b]
+            e = self.flux_errs[b]
+            z = self.covariates[b]
+            t0 = np.min(t)
+            # transit
+            flux_tr = self.transit_models[b].evaluate_ps(
+                k[i], self.ldc[b], tc, per, a_Rs, inc, e=0, w=0
+            )
+
+            # raw data and binned
+            tbin, ybin, yebin = lc.binning_equal_interval(t, f, e, binsize, t0)
+
+            ax[0].plot(t, f, ".k", alpha=0.1)
+            ax[0].plot(tbin, ybin, "o", color=colors[b], alpha=0.5)
+            # flux with trend
+            ax[0].plot(t, flux_tr * trends[b], lw=3, c=colors[b])
+            ax[0].set_xlabel(f"BJD-{self.time_offset}")
+            ax[0].set_ylabel("Normalized Flux")
+            if ylims:
+                ax[0].set_ylim(*ylims)
+
+            # detrended and binned
+            tbin, ybin, yebin = lc.binning_equal_interval(
+                t, f / trends[b], e, binsize, t0
+            )
+            ax[1].plot(t, f / trends[b], ".k", alpha=0.1)
+            ax[1].plot(tbin, ybin, "o", color=colors[b], alpha=0.5)
+            # upsampled transit
+            xmodel, ymodel = transits[b]
+            ax[1].plot(xmodel, ymodel, lw=3, c=colors[b])
+            _ = self.plot_ing_egr(ax=ax[1], ymin=0.9, ymax=1.0, color="C0")
+            ax[1].axhline(
+                1 - depth,
+                color="blue",
+                linestyle="dashed",
+                label="TESS",
+                alpha=0.5,
+            )
+            if ylims:
+                ax[1].set_ylim(*ylims)
+            ax[1].set_xlabel(f"BJD-{self.time_offset}")
+            ax[1].legend(loc="best")
+            fig.suptitle(f"{b}-band")
+        return fig
+
+    def plot_chain(self, start=0, end=None, figsize=None):
+        """
+        visualize MCMC walkers
+
+        start : int
+            parameter id (0 means first)
+        end : int
+            parameter id
+        """
+        end = self.ndim if end is None else end
+        figsize = (10, 10) if figsize is None else figsize
+        fig, axes = plt.subplots(end - start, figsize=figsize, sharex=True)
+        samples = self.sampler.get_chain()
+        for i in np.arange(start, end):
+            ax = axes[i]
+            ax.plot(samples[:, :, start + i], "k", alpha=0.3)
+            ax.set_xlim(0, len(samples))
+            ax.set_ylabel(self.model_param_names[i])
+            ax.yaxis.set_label_coords(-0.1, 0.5)
+        axes[-1].set_xlabel("step number")
+        return fig
+
+    def plot_corner(
+        self, transform=False, discard=1, thin=1, start=0, end=None
+    ):
+        """
+        corner plot of MCMC chain
+
+        start : int
+            parameter id (0 means first)
+        end : int
+            parameter id
+
+        TODO show priors in `truths` argument of corner
+        """
+        end = self.ndim if end is None else end
+        if self.use_r1r2 and transform:
+            df = self.get_mcmc_samples(discard=discard, thin=thin)
+            labels = df.columns.copy()
+            labels[0] = f"{labels[0]}-{self.time_offset:,}"
+            df["tc"] = df["tc"].values - self.time_offset
+            cols = labels[start:end]
+            fig = corner.corner(df[cols], labels=cols, show_titles=True)
+        else:
+            labels = self.model_param_names.copy()
+            labels[0] = f"{labels[0]}-{self.time_offset:,}"
+            # fc = self.sampler.get_chain(flat=True, discard=discard, thin=thin)
+            fc = self.sampler.flatchain.copy()
+            if discard > 1:
+                fc = fc.reshape(self.nsteps, self.nwalkers, -1)
+                fc = fc[discard::thin].reshape(-1, self.ndim)
+            fig = corner.corner(
+                fc[:, start:end], labels=labels[start:end], show_titles=True
+            )
+        return fig
+
+    def plot_detrended_data_and_transit(
+        self,
+        pv: list,
+        title: str=None,
+        xlims: tuple=None,
+        ylims: tuple=None,
+        binsize: float=600 / 86400,
+        msize: int=5,
+        font_size: int=20,
+        title_height: float=0.95,
+        figsize: tuple=None,
+    ):
+        """
+        pv : list
+            parameter vector (uses optimized values if None)
+
+        - 2x2 plot of detrended data with transit model
+        - time is in units of hours
+
+        See also `plot_detrended_data_and_transit()`
+        """
+        title = (
+            f"{self.name}{self.alias} (TIC{self.ticid}{self.alias})"
+            if title is None
+            else title
+        )
+        figsize = (10, 10) if figsize is None else figsize
+        ncols = 2 if self.nband > 1 else 1
+        nrows = 2 if self.nband > 2 else 1
+        fig, axs = plt.subplots(
+            ncols,
+            nrows,
+            figsize=figsize,
+            sharey="row",
+            sharex="col",
+            tight_layout=True,
+        )
+        ax = axs.flatten()
+        depth = self.planet_params["rprs"][0] ** 2
+        # unpack fixed parameters
+        per = self.period[0]
+        # unpack free parameters
+        tc, _, _, _, _ = self.unpack_parameters(pv)
+
+        for i, b in enumerate(self.bands):
+            t = self.times[b]
+            f = self.fluxes[b]
+            e = self.flux_errs[b]
+            detrended_flux = f / self.get_trend_models(pv)[b]
+            ax[i].plot((t - tc) * 24, detrended_flux, "k.", alpha=0.2)
+            # raw data and binned
+            tbin, ybin, yebin = lc.binning_equal_interval(
+                t, detrended_flux, e, binsize, tc
+            )
+            ax[i].errorbar(
+                (tbin - tc) * 24, ybin, yerr=yebin, fmt="ok", markersize=msize
+            )
+            xmodel, ymodel = self.get_upsampled_transit_models(
+                pv, npoints=500
+            )[b]
+            ax[i].plot((xmodel - tc) * 24, ymodel, "-", lw=3, color=colors[b])
+            ax[i].axhline(
+                1 - depth,
+                color="blue",
+                linestyle="dashed",
+                label="TESS",
+                alpha=0.5,
+            )
+            if self.nband % 2 == 1:
+                ax[i].set_ylabel("Relative Flux", fontsize=font_size * 0.8)
+            ax[i].set_xlabel(
+                "Time from transit center (hours)", fontsize=font_size * 0.8
+            )
+            if (self.nband > 2) and (i < 2):
+                ax[i].set_xlabel("")
+
+            if xlims is None:
+                xmin, xmax = ax[i].get_xlim()
+            else:
+                ax[i].set_xlim(*xlims)
+                xmin, xmax = xlims
+
+            if ylims is None:
+                ymin, ymax = ax[i].get_ylim()
+            else:
+                ax[i].set_ylim(*ylims)
+                ymin, ymax = ylims
+            ax[i].xaxis.set_minor_locator(AutoMinorLocator(5))
+            ax[i].yaxis.set_minor_locator(AutoMinorLocator(5))
+            ax[i].tick_params(labelsize=font_size * 0.8)
+            tx = xmin + (xmax - xmin) * 0.75
+            ty = ymin + (ymax - ymin) * 0.9
+            ax[i].text(
+                tx, ty, f"{b}-band", color=colors[b], fontsize=font_size * 0.8
+            )
+        ax[1].set_title(
+            f"{self.date4plot}, {self.inst}", loc="right", fontsize=font_size
+        )
+        ax[i].legend(loc="best")
+        fig.suptitle(title, fontsize=font_size, y=title_height)
+        return fig
+
+    def plot_posteriors(
+        self,
+        title: str = None,
+        figsize: tuple = None,
+        font_size: float = 12,
+        nsigma: float = 3,
+        nbins: int = 50,
+        save: bool = False,
+        suffix: str = ".pdf",
+    ):
+        """
+        plot Rp/Rs, Tc and impact parameter posteriors
+        """
+        errmsg = "Valid only for chromatic model"
+        if not self.model == "chromatic":
+            raise ValueError(errmsg)
+
+        figsize = (12, 5) if figsize is None else figsize
+        title = (
+            f"{self.name}{self.alias} (TIC{self.ticid}{self.alias})"
+            if title is None
+            else title
+        )
+
+        df = self.get_mcmc_samples()
+
+        fig, axs = plt.subplots(1, 3, figsize=figsize)
+        ax = axs.flatten()
+
+        ############# Rp/Rs
+        for i, b in enumerate(self.bands):
+            k = df["k_" + b].values
+            k_med = df["k_" + b].median()
+            k_percs = lc.percentile(k)
+            # med, low1, hig1, low2, hig2, low3, hig3
+            k_err1 = k_percs[0] - k_percs[1], k_percs[2] - k_percs[0]
+            k_err2 = k_percs[0] - k_percs[3], k_percs[4] - k_percs[0]
+            k_err3 = k_percs[0] - k_percs[5], k_percs[6] - k_percs[0]
+            ax[0].errorbar(
+                i,
+                k_med,
+                yerr=np.c_[k_err1].T,
+                elinewidth=40,
+                fmt="none",
+                alpha=0.5,
+                zorder=1,
+                color=colors[b],
+            )
+            ax[0].errorbar(
+                i,
+                k_med,
+                yerr=np.c_[k_err2].T,
+                elinewidth=40,
+                fmt="none",
+                alpha=0.3,
+                zorder=2,
+                color=colors[b],
+            )
+            ax[0].errorbar(
+                i,
+                k_med,
+                yerr=np.c_[k_err3].T,
+                elinewidth=40,
+                fmt="none",
+                alpha=0.1,
+                zorder=3,
+                color=colors[b],
+            )
+            print(f"Rp/Rs({b})^2 = {1e3*k_med**2:.2f} ppt")
+
+        k0 = self.planet_params["rprs"][0]
+        ax[0].axhline(k0, linestyle="dashed", color="black", label="TESS")
+        ax[0].legend(loc="best")
+        ax[0].set_xlim(-0.5, 3.5)
+        ax[0].set_xticks(range(self.nband))
+        ax[0].set_xticklabels(self.bands)
+        ax[0].set_xlabel("Band", labelpad=25, fontsize=font_size * 1.5)
+        ax[0].set_ylabel("Radius ratio", fontsize=font_size * 1.5)
+
+        ax[0].text(
+            0.0,
+            1.12,
+            title,
+            horizontalalignment="left",
+            verticalalignment="center",
+            transform=ax[0].transAxes,
+            fontsize=font_size * 1.5,
+        )
+        ax[0].text(
+            0.0,
+            1.05,
+            f"{self.model.title()} transit fit,  $\Delta$BIC (non-transit - transit) = {self.bic_delta:.1f}",
+            horizontalalignment="left",
+            verticalalignment="center",
+            transform=ax[0].transAxes,
+            fontsize=font_size,
+        )
+
+        ############# Mid-transit
+        tc = df["tc"].values - self.time_offset
+        tc_med = df["tc"].median() - self.time_offset
+        tc_percs = lc.percentile(tc)
+
+        # posterior
+        n, bins, _ = ax[1].hist(
+            tc, density=True, bins=nbins, zorder=5, label="Posterior"
+        )
+
+        # prediction
+        tc0, tc_err0 = self.tc
+        xmodel = np.linspace(
+            tc0 - nsigma * tc_err0, tc0 + nsigma * tc_err0, 200
+        )
+        ymodel = max(n) * np.exp(-((xmodel - tc0) ** 2) / tc_err0**2)
+        ax[1].plot(xmodel, ymodel, label="Prediction", lw=3, zorder=5)
+        ax[1].set_xlabel(
+            f"Tc (BJD-{self.time_offset:.0f})",
+            labelpad=25,
+            fontsize=font_size * 1.5,
+        )
+        ax[1].legend(loc="best")
+
+        imp = df["imp"].values
+        _ = ax[2].hist(imp, density=True, bins=nbins)
+        ax[2].set_xlabel(
+            "Impact parameter", labelpad=25, fontsize=font_size * 1.5
+        )
+        ax[2].set_title(
+            f"{self.date4plot}, {self.inst}",
+            loc="right",
+            fontsize=font_size * 1.5,
+        )
+        if save:
+            outfile = f"{self.outdir}/{self.outfile_prefix}_posteriors"
+            outfile += suffix if self.mask_start is None else f"_mask{suffix}"
+            savefig(fig, outfile, dpi=300, writepdf=False)
+        return fig
+
+    def plot_final_fit(
+        self,
+        discard: int = 1,
+        thin: int = 1,
+        nsamples: int = 100,
+        ylims_top: tuple = (0.9, 1.02),
+        ylims_bottom: tuple = (0.9, 1.02),
+        msize: int = 5,
+        font_size: int = 25,
+        title: str = None,
+        figsize: tuple = None,
+        binsize: float = 600 / 86400,
+        save: bool = False,
+        suffix: str = ".pdf",
+    ):
+        ymin1, ymax1 = ylims_top
+        ymin2, ymax2 = ylims_bottom
+
+        figsize = (16, 12) if figsize is None else figsize
+        fig, ax = plt.subplots(
+            2, self.nband, figsize=figsize, sharey="row", sharex="col"
+        )
+        plt.subplots_adjust(hspace=0.1, wspace=0)
+
+        x1 = [0.3, 0.5, 0.7]
+        x2 = [0.5, 0.7, 0.9]
+        y1 = [0.3, 0.6]
+        y2 = [0.6, 0.9]
+
+        # unpack fixed parameters
+        per = self.period[0]
+        # unpack free parameters
+        if not hasattr(self, "best_fit_params"):
+            raise ValueError("Run `sample_mcmc()` first.")
+
+        pv = self.best_fit_params
+        if self.use_r1r2:
+            tc_best, a_Rs_best, r1, r2, d_best = self.unpack_parameters(pv)
+            imp_best, k_best = r1r2_to_imp_k(
+                r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
+            )
+        else:
+            tc_best, a_Rs_best, imp_best, k_best, d_best = (
+                self.unpack_parameters(pv)
+            )
+
+        # derived
+        inc_best = np.arccos(imp_best / a_Rs_best)
+
+        trends_best = self.get_trend_models(self.best_fit_params)
+        transits_best = self.get_upsampled_transit_models(self.best_fit_params)
+
+        # fc = self.sampler.get_chain(flat=True, discard=discard, thin=thin)
+        fc = self.sampler.flatchain.copy()
+        if discard > 1:
+            fc = fc.reshape(self.nsteps, self.nwalkers, -1)
+            fc = fc[discard::thin].reshape(-1, self.ndim)
+        for i, b in enumerate(self.bands):
+            t = self.times[b]
+            f = self.fluxes[b]
+            e = self.flux_errs[b]
+            z = self.covariates[b]
+            t0 = np.min(t)
+
+            # raw and binned data
+            tbin, ybin, yebin = lc.binning_equal_interval(t, f, e, binsize, t0)
+            ax[0, i].plot(t, f, ".k", alpha=0.1)
+            ax[0, i].errorbar(
+                tbin, ybin, yerr=yebin, fmt="ok", markersize=msize
+            )
+
+            # plot each random mcmc samples
+            rand = np.random.randint(len(fc), size=nsamples)
+            for j in range(len(rand)):
+                idx = rand[j]
+                # unpack free parameters
+                if self.use_r1r2:
+                    tc, a_Rs, r1 = fc[idx, : self.k_idx]
+                    if self.model == "chromatic":
+                        r2 = fc[idx, self.k_idx : self.d_idx]
+                    elif self.model == "achromatic":
+                        r2 = np.zeros(self.nband) + fc[idx, self.k_idx]
+                    imp, k = r1r2_to_imp_k(
+                        r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
+                    )
+                else:
+                    tc, a_Rs, imp = fc[idx, : self.k_idx]
+                    if self.model == "chromatic":
+                        k = fc[idx, self.k_idx : self.d_idx]
+                    elif self.model == "achromatic":
+                        k = np.zeros(self.nband) + fc[idx, self.k_idx]
+                d = fc[idx, self.d_idx : self.d_idx + self.nband]
+                # derived parameters
+                inc = np.arccos(imp / a_Rs)
+                # transit
+                flux_tr = self.transit_models[b].evaluate_ps(
+                    k[i], self.ldc[b], tc, per, a_Rs, inc, e=0, w=0
+                )
+                flux_tr_time = d[i] * (t - tc) * flux_tr
+                c = np.polyfit(z, (f - flux_tr_time) / flux_tr, self.lm_order)
+                # transit with trend
+                ax[0, i].plot(
+                    t,
+                    flux_tr * (np.polyval(c, z) + d[i] * (t - tc)),
+                    alpha=0.05,
+                    color=colors[b],
+                )
+
+            # best-fit transit model
+            flux_tr = self.transit_models[b].evaluate_ps(
+                k_best[i],
+                self.ldc[b],
+                tc_best,
+                per,
+                a_Rs_best,
+                inc_best,
+                e=0,
+                w=0,
+            )
+
+            tbin, ybin, yebin = lc.binning_equal_interval(
+                t, f / trends_best[b], e, binsize, t0
+            )
+            # detrended flux
+            ax[1, i].plot(t, f / trends_best[b], ".k", alpha=0.1)
+            ax[1, i].errorbar(
+                tbin, ybin, yerr=yebin, fmt="ok", markersize=msize
+            )
+            # super sampled best-fit transit model
+            xmodel, ymodel = transits_best[b]
+            ax[1, i].plot(xmodel, ymodel, color=colors[b], linewidth=3)
+            ax[0, i].yaxis.set_minor_locator(AutoMinorLocator(5))
+            ax[1, i].yaxis.set_minor_locator(AutoMinorLocator(5))
+            ax[0, i].xaxis.set_minor_locator(AutoMinorLocator(5))
+            ax[1, i].xaxis.set_minor_locator(AutoMinorLocator(5))
+            ax[0, i].set_ylim(ymin1, ymax1)
+            ax[1, i].set_ylim(ymin2, ymax2)
+
+            tx = np.min(t) + (np.max(t) - np.min(t)) * 0.75
+            ty = ymin1 + (ymax1 - ymin1) * 0.9
+            ax[0, i].text(
+                tx, ty, f"{b}-band", color=colors[b], fontsize=font_size * 0.6
+            )
+            tx = np.min(t) + (np.max(t) - np.min(t)) * 0.02
+            ty = ymin2 + (ymax2 - ymin2) * 0.8
+            ax[1, i].text(tx, ty, "Detrended", fontsize=font_size * 0.6)
+
+            rms = np.std(
+                f - flux_tr * (np.polyval(c, z) + d_best[i] * (t - tc_best))
+            )
+            rms_text = f"rms = {rms:.4f}"
+            ty = ymin2 + (ymax2 - ymin2) * 0.1
+            ax[1, i].text(tx, ty, rms_text, fontsize=font_size * 0.6)
+            depth = self.planet_params["rprs"][0] ** 2
+            ax[1, i].axhline(
+                1 - depth,
+                color="blue",
+                linestyle="dashed",
+                label="TESS",
+                alpha=0.5,
+            )
+            _ = self.plot_ing_egr(ax=ax[1, i], ymin=0.9, ymax=1.0, color="C0")
+            if i == 0:
+                ax[0, i].set_ylabel("Flux ratio", fontsize=font_size)
+                ax[1, i].set_ylabel("Flux ratio", fontsize=font_size)
+                ax[0, i].tick_params(labelsize=16)
+                ax[1, i].tick_params(labelsize=16)
+                target_name = (
+                    f"{self.name}{self.alias} (TIC{self.ticid}{self.alias})"
+                    if title is None
+                    else title
+                )
+                ax[0, i].text(
+                    0.0,
+                    1.14,
+                    target_name,
+                    horizontalalignment="left",
+                    verticalalignment="center",
+                    transform=ax[0, i].transAxes,
+                    fontsize=font_size,
+                )
+                text = f"{self.model.title()} transit fit,  "
+                text += f"$\Delta$BIC (non-transit - transit) = {self.bic_delta:.1f}"
+                ax[0, i].text(
+                    0.0,
+                    1.05,
+                    text,
+                    horizontalalignment="left",
+                    verticalalignment="center",
+                    transform=ax[0, i].transAxes,
+                    fontsize=font_size * 0.6,
+                )
+            if (i > 0) and (i == self.nband - 1):
+                ax[0, i].set_title(
+                    f"{self.date4plot}, {self.inst}",
+                    loc="right",
+                    fontsize=font_size * 0.8,
+                )
+            if i > 0:
+                ax[0, i].tick_params(
+                    labelleft=False,
+                    labelright=False,
+                    labeltop=False,
+                    labelsize=16,
+                )
+                ax[1, i].tick_params(
+                    labelleft=False,
+                    labelright=False,
+                    labeltop=False,
+                    labelsize=16,
+                )
+            ax[1, i].set_xlabel(
+                f"BJD - {self.time_offset:.0f}",
+                labelpad=30,
+                fontsize=font_size,
+            )
+        ax[1, i].legend(loc="lower right", fontsize=12)
+        if save:
+            outfile = f"{self.outdir}/{self.outfile_prefix}_transit_fit"
+            outfile += suffix if self.mask_start is None else f"_mask{suffix}"
+            savefig(fig, outfile, dpi=300, writepdf=False)
+        return fig
+
+    def plot_ing_egr(self, ax, ymin=0.9, ymax=1.0, color="C0"):
+        """
+        plot ingress and egress timings over detrended light curve plot
+        """
+        tdur, tdure = self.tdur
+        ing, egr = self.ingress[0], self.egress[0]
+        ax.axvspan(
+            ing - tdure / 2,
+            ing + tdure / 2,
+            alpha=1,
+            ymin=ymin,
+            ymax=ymax,
+            color=color,
+        )
+        ax.axvspan(
+            ing - 3 * tdure / 2,
+            ing + 3 * tdure / 2,
+            alpha=0.5,
+            ymin=ymin,
+            ymax=ymax,
+            color=color,
+        )
+        ax.axvspan(
+            egr - tdure / 2,
+            egr + tdure / 2,
+            alpha=1,
+            ymin=ymin,
+            ymax=ymax,
+            color=color,
+        )
+        ax.axvspan(
+            egr - 3 * tdure / 2,
+            egr + 3 * tdure / 2,
+            alpha=0.5,
+            ymin=ymin,
+            ymax=ymax,
+            color=color,
+        )
+        return ax
+
+    def plot_fov(
+        self,
+        ra: float,
+        dec: float,
+        ref_fits_file_path: str,
+        ref_obj_file_path: str,
+        show_target: bool = False,
+        cmap: str = "gray",
+        contrast: float = 0.5,
+        text_offset: tuple = (0, 0),
+        phot_aper_pix: int = 10,
+        title: str = None,
+        title_height: float = 1.0,
+        font_size: float = 20,
+        show_scale_bar: bool = True,
+        marker_color: str = "yellow",
+        scale_color: str = "w",
+        figsize: tuple = None,
+        show_grid: bool = True,
+        save: bool = False,
+        suffix: str = ".pdf",
+    ):
+        """
+        Field of View given reference image produced by AFPHOT pipeline
+        """
+        figsize = (10, 10) if figsize is None else figsize
+        dr, dd = text_offset
+
+        header = fits.getheader(ref_fits_file_path)
+        data = fits.getdata(ref_fits_file_path)
+        wcs = WCS(header)
+
+        columns = "id x y xpin ypix flux bkg".split()
+        df = pd.read_csv(
+            ref_obj_file_path,
+            comment="#",
+            names=columns,
+            delim_whitespace=True,
+        )
+        star_ids = df["id"].values
+        refxy = df[["x", "y"]].values
+        coords = wcs.all_pix2world(refxy, 0)
+        pixscale = header["PIXSCALE"]
+        band = header["FILTER"]
+        title = (
+            f"{self.name}\n{self.inst} {band[0]}-band"
+            if title is None
+            else title
+        )
+
+        fig = plt.figure(figsize=figsize)
+        fig.subplots_adjust(
+            top=title_height
+        )  # Adjusted subplots_adjust to give more space to the title
+        ax = fig.add_subplot(111, projection=wcs)
+        norm = ImageNormalize(data, interval=ZScaleInterval(contrast=contrast))
+        ax.imshow(data, norm=norm, origin="lower", cmap=cmap)
+
+        # target
+        rad_marker = phot_aper_pix * pixscale
+        if show_target:
+            c = SphericalCircle(
+                (ra * u.deg, dec * u.deg),
+                rad_marker * u.arcsec,
+                edgecolor="red",
+                facecolor="none",
+                lw=3,
+                zorder=10,
+                transform=ax.get_transform("fk5"),
+            )
+            ax.add_patch(c)
+            # ax.text(ra+dr, dec+dd, 'target', fontsize=20,
+            #         color='red', transform=ax.get_transform('fk5'))
+        for i, (r, d) in enumerate(coords):
+            j = int(star_ids[i])
+            c = SphericalCircle(
+                (r * u.deg, d * u.deg),
+                rad_marker * u.arcsec,
+                edgecolor=marker_color,
+                facecolor="none",
+                lw=2,
+                transform=ax.get_transform("fk5"),
+            )
+            ax.add_patch(c)
+            ax.text(
+                r + dr,
+                d + dd,
+                str(j),
+                fontsize=20,
+                color=marker_color,
+                transform=ax.get_transform("fk5"),
+            )
+        ax.set_xlim(0, data.shape[1])
+        ax.set_ylim(0, data.shape[0])
+        if show_scale_bar:
+            sx, sy = 400, 50
+            ax.hlines(sy, sx - 60 / pixscale, sx, color=scale_color, lw=3)
+            ax.annotate(
+                text="1'",
+                xy=(sx - 60 / pixscale, sy + 10),
+                fontsize=font_size * 1.5,
+                color=scale_color,
+                xycoords="data",
+            )
+        fig.suptitle(title, y=title_height, fontsize=font_size)
+        # coord_format="dd:mm:ss"
+        # ax.coords[1].set_major_formatter(coord_format)
+        # ax.coords[0].set_major_formatter(coord_format)
+        ax.set_ylabel("Dec")
+        ax.set_xlabel("RA")
+        if show_grid:
+            ax.grid()
+        fig.tight_layout()
+        if save:
+            outfile = f"{self.outdir}/{self.outfile_prefix}_FOV{suffix}"
+            savefig(fig, outfile, dpi=300, writepdf=False)
+        return fig
+
+    def plot_fov_zoom(
+        self,
+        ra: float,
+        dec: float,
+        ref_fits_file_path: str,
+        ref_obj_file_path: str,
+        zoom_rad_arcsec: float,
+        show_target: bool = False,
+        cmap: str = "gray",
+        contrast: float = 0.5,
+        text_offset: tuple = (0, 0),
+        phot_aper_pix: int = 10,
+        title: str = None,
+        title_height: float = 1.0,
+        font_size: float = 20,
+        show_scale_bar: bool = True,
+        bar_arcsec=None,
+        marker_color: str = "yellow",
+        scale_color: str = "w",
+        figsize: tuple = None,
+        show_grid: bool = True,
+        save: bool = False,
+        suffix: str = ".pdf",
+    ):
+        """
+        Zoomed-in FOV
+        """
+        figsize = (10, 10) if figsize is None else figsize
+        dr, dd = text_offset
+
+        header = fits.getheader(ref_fits_file_path)
+        data = fits.getdata(ref_fits_file_path)
+        wcs = WCS(header)
+
+        pixscale = header["PIXSCALE"]
+        band = header["FILTER"]
+        title = (
+            f"{self.name}\n{self.inst} {band[0]}-band (zoomed-in)"
+            if title is None
+            else title
+        )
+
+        columns = "id x y xpin ypix flux bkg".split()
+        df = pd.read_csv(
+            ref_obj_file_path,
+            comment="#",
+            names=columns,
+            delim_whitespace=True,
+        )
+        star_ids = df["id"].values
+        refxy = df[["x", "y"]].values
+        coords = wcs.all_pix2world(refxy, 0)
+        # filter those within zoom_rad_arcsec
+        sep = SkyCoord(coords * u.deg).separation(
+            SkyCoord(ra, dec, unit="deg")
+        )
+        idx = sep < zoom_rad_arcsec * u.arcsec
+        coords = coords[idx]
+        star_ids = star_ids[idx]
+
+        xy = wcs.all_world2pix(np.c_[ra, dec], 0)
+        xpix, ypix = int(xy[0][0]), int(xy[0][1])
+        dx = dy = round(zoom_rad_arcsec / pixscale)
+        dcrop = data[ypix - dy : ypix + dy, xpix - dx : xpix + dx]
+        wcscrop = wcs[ypix - dy : ypix + dy, xpix - dx : xpix + dx]
+
+        fig = plt.figure(figsize=figsize)
+        fig.subplots_adjust(top=title_height)
+        ax = fig.add_subplot(111, projection=wcscrop)
+        norm = ImageNormalize(
+            dcrop, interval=ZScaleInterval(contrast=contrast)
+        )
+        ax.imshow(dcrop, norm=norm, origin="lower", cmap=cmap)
+
+        # target
+        rad_marker = phot_aper_pix * pixscale
+        if show_target:
+            c = SphericalCircle(
+                (ra * u.deg, dec * u.deg),
+                rad_marker * u.arcsec,
+                edgecolor="red",
+                facecolor="none",
+                lw=3,
+                zorder=10,
+                transform=ax.get_transform("fk5"),
+            )
+            ax.add_patch(c)
+            ax.text(
+                ra + dr,
+                dec + dd,
+                "target",
+                fontsize=20,
+                color="red",
+                transform=ax.get_transform("fk5"),
+            )
+        for i, (r, d) in enumerate(coords):
+            j = int(star_ids[i])
+            c = SphericalCircle(
+                (r * u.deg, d * u.deg),
+                rad_marker * u.arcsec,
+                edgecolor=marker_color,
+                facecolor="none",
+                lw=2,
+                transform=ax.get_transform("fk5"),
+            )
+            ax.add_patch(c)
+            ax.text(
+                r + dr,
+                d + dd,
+                str(j),
+                fontsize=20,
+                color=marker_color,
+                transform=ax.get_transform("fk5"),
+            )
+        ax.set_xlim(0, dcrop.shape[1])
+        ax.set_ylim(0, dcrop.shape[0])
+        if show_scale_bar:
+            bar_arcsec = bar_arcsec if bar_arcsec else zoom_rad_arcsec // 2
+            imsize = dcrop.shape
+            sx, sy = int(imsize[0] * 0.3), int(imsize[1] * 0.1)
+            ax.hlines(
+                sy, sx - bar_arcsec / pixscale, sx, color=scale_color, lw=3
+            )
+            ax.annotate(
+                text=f'{bar_arcsec}"',
+                xy=(sx - bar_arcsec / pixscale, sy + 10),
+                fontsize=font_size * 2,
+                color=scale_color,
+                xycoords="data",
+            )
+        fig.suptitle(title, y=title_height, fontsize=font_size)
+        # coord_format="dd:mm:ss"
+        # ax.coords[1].set_major_formatter(coord_format)
+        # ax.coords[0].set_major_formatter(coord_format)
+        ax.set_ylabel("Dec")
+        ax.set_xlabel("RA")
+        if show_grid:
+            ax.grid()
+        fig.tight_layout()
+        if save:
+            outfile = f"{self.outdir}/{self.outfile_prefix}_FOV_zoom{suffix}"
+            savefig(fig, outfile, dpi=300, writepdf=False)
+        return fig
+
+    def plot_gaia_sources(
+        self,
+        fits_file_path: str,
+        gaia_sources: pd.DataFrame,
+        phot_aper_pix: int = 10,
+        show_scale_bar: bool = True,
+        bar_arcsec: float = 30,
+        text_offset: tuple = (0, 0),
+        fov_padding: float = 1.1,
+        title_height: float = 1,
+        figsize: tuple = None,
+        title: str = None,
+        marker_color: str = "yellow",
+        scale_color: str = "w",
+        cmap: str = "gray",
+        contrast: float = 0.5,
+        font_size: float = 20,
+        show_grid: bool = True,
+        save: bool = False,
+        suffix: str = ".pdf",
+    ):
+        """
+        plots gaia sources on the given fits image and zoomed up
+        to the furthest gaia_source separation from target
+        based on `distance` (in arcsec) column
+
+        See also `Star.get_gaia_sources()`
+        """
+        dr, dd = text_offset
+        figsize = (10, 10) if figsize is None else figsize
+        header = fits.getheader(fits_file_path)
+        data = fits.getdata(fits_file_path)
+        wcs = WCS(header)
+        pixscale = header["PIXSCALE"]
+        band = header["FILTER"]
+        title = (
+            f"{self.name}\n{self.inst} {band[0]}-band"
+            if title is None
+            else title
+        )
+
+        # zoomed-in image
+        ra, dec = gaia_sources.loc[0, ["ra", "dec"]].values
+        xy = wcs.all_world2pix(np.c_[ra, dec], 0)
+        xpix, ypix = int(xy[0][0]), int(xy[0][1])
+        rad_arcsec = fov_padding * gaia_sources["distance"].max()
+        dx = dy = round(rad_arcsec / pixscale)
+        dcrop = data[ypix - dy : ypix + dy, xpix - dx : xpix + dx]
+        wcscrop = wcs[ypix - dy : ypix + dy, xpix - dx : xpix + dx]
+
+        fig = plt.figure(figsize=figsize)
+        fig.subplots_adjust(
+            top=title_height
+        )  # Adjusted subplots_adjust to give more space to the title
+        ax = fig.add_subplot(111, projection=wcscrop)
+        norm = ImageNormalize(
+            dcrop, interval=ZScaleInterval(contrast=contrast)
+        )
+        ax.imshow(dcrop, norm=norm, origin="lower", cmap=cmap)
+
+        coords = gaia_sources[["ra", "dec"]].values
+        rad_marker = phot_aper_pix * pixscale
+        for i, (r, d) in enumerate(coords):
+            if i == 0:
+                # target
+                lw = 3
+                mc = "r"
+            else:
+                lw = 2
+                mc = marker_color
+            c = SphericalCircle(
+                (r * u.deg, d * u.deg),
+                rad_marker * u.arcsec,
+                edgecolor=mc,
+                facecolor="none",
+                lw=lw,
+                transform=ax.get_transform("fk5"),
+            )
+            ax.add_patch(c)
+            ax.text(
+                r + dr,
+                d + dd,
+                str(i + 1),
+                fontsize=20,
+                color=mc,
+                transform=ax.get_transform("fk5"),
+            )
+        # ax.set_xlim(0, dcrop.shape[1])
+        # ax.set_ylim(0, dcrop.shape[0])
+        if show_scale_bar:
+            imsize = dcrop.shape
+            sx, sy = int(imsize[0] * 0.3), int(imsize[1] * 0.1)
+            ax.hlines(
+                sy, sx - bar_arcsec / pixscale, sx, color=scale_color, lw=3
+            )
+            ax.annotate(
+                text=f'{bar_arcsec}"',
+                xy=(sx - bar_arcsec / pixscale, sy + 10),
+                fontsize=font_size * 2,
+                color=scale_color,
+                xycoords="data",
+            )
+        fig.suptitle(title, y=title_height, fontsize=font_size)
+        # coord_format="dd:mm:ss"
+        # ax.coords[1].set_major_formatter(coord_format)
+        # ax.coords[0].set_major_formatter(coord_format)
+        ax.set_ylabel("Dec")
+        ax.set_xlabel("RA")
+        if show_grid:
+            ax.grid()
+        fig.tight_layout()
+        if save:
+            outfile = (
+                f"{self.outdir}/{self.outfile_prefix}_gaia_sources{suffix}"
+            )
+            savefig(fig, outfile, dpi=300, writepdf=False)
+        return fig
+
+
+@dataclass
+class Star:
+    name: str
+    star_params: Dict[str, Tuple[float, float]] = None
+    source: str = "tic"
+
+    def __post_init__(self):
+        if self.star_params is None:
+            self.get_star_params()
+
+        sources = set(
+            [
+                p.get("prov")
+                for i, p in enumerate(self.data_json["stellar_parameters"])
+            ]
+        )
+        errmsg = f"{self.source} must be in {sources}"
+        assert self.source in sources, errmsg
+
+    def get_tfop_data(self):
+        base_url = "https://exofop.ipac.caltech.edu/tess"
+        self.exofop_url = (
+            f"{base_url}/target.php?id={self.name.replace(' ','')}&json"
+        )
+        response = urlopen(self.exofop_url)
+        assert response.code == 200, "Failed to get data from ExoFOP-TESS"
+        try:
+            data_json = json.loads(response.read())
+            return data_json
+        except Exception:
+            raise ValueError(f"No TIC data found for {self.name}")
+
+    def get_star_params(self):
+        if not hasattr(self, "data_json"):
+            self.data_json = self.get_tfop_data()
+
+        self.ra = float(self.data_json["coordinates"].get("ra"))
+        self.dec = float(self.data_json["coordinates"].get("dec"))
+        self.ticid = self.data_json["basic_info"].get("tic_id")
+
+        idx = 1
+        for i, p in enumerate(self.data_json["stellar_parameters"]):
+            if p.get("prov") == self.source:
+                idx = i + 1
+                break
+        star_params = self.data_json["stellar_parameters"][idx]
+
+        try:
+            self.rstar = tuple(
+                map(
+                    float,
+                    (
+                        star_params.get("srad", np.nan),
+                        star_params.get("srad_e", np.nan),
+                    ),
+                )
+            )
+            self.mstar = tuple(
+                map(
+                    float,
+                    (
+                        star_params.get("mass", np.nan),
+                        star_params.get("mass_e", np.nan),
+                    ),
+                )
+            )
+            # stellar density in rho_sun
+            self.rhostar = (
+                self.mstar[0] / self.rstar[0] ** 3,
+                np.sqrt(
+                    (1 / self.rstar[0] ** 3) ** 2 * self.mstar[1] ** 2
+                    + (3 * self.mstar[0] / self.rstar[0] ** 4) ** 2
+                    * self.rstar[1] ** 2
+                ),
+            )
+            print(f"Mstar=({self.mstar[0]:.2f},{self.mstar[1]:.2f}) Msun")
+            print(f"Rstar=({self.rstar[0]:.2f},{self.rstar[1]:.2f}) Rsun")
+            print(
+                f"Rhostar=({self.rhostar[0]:.2f},{self.rhostar[1]:.2f}) rhosun"
+            )
+            self.teff = tuple(
+                map(
+                    float,
+                    (
+                        star_params.get("teff", np.nan),
+                        star_params.get("teff_e", 500),
+                    ),
+                )
+            )
+            self.logg = tuple(
+                map(
+                    float,
+                    (
+                        star_params.get("logg", np.nan),
+                        star_params.get("logg_e", 0.1),
+                    ),
+                )
+            )
+            val = star_params.get("feh", 0)
+            val = 0 if (val is None) or (val == "") else val
+            val_err = star_params.get("feh_e", 0.1)
+            val_err = 0.1 if (val is None) or (val_err == "") else val_err
+            self.feh = tuple(map(float, (val, val_err)))
+            print(f"teff=({self.teff[0]:.0f},{self.teff[1]:.0f}) K")
+            print(f"logg=({self.logg[0]:.2f},{self.logg[1]:.2f}) cgs")
+            print(f"feh=({self.feh[0]:.2f},{self.feh[1]:.2f}) dex")
+        except:
+            raise ValueError(f"Check exofop: {self.exofop_url}")
+
+    def get_gaia_sources(self, rad_arcsec=30):
+        target_coord = SkyCoord(ra=self.ra * u.deg, dec=self.dec * u.deg)
+        if (not hasattr(self, "gaia_sources")) or (rad_arcsec > 30):
+            print(
+                f'Querying Gaia sources {rad_arcsec}" around {self.name}: ({self.ra:.4f}, {self.dec:.4f}) deg.'
+            )
+            self.gaia_sources = Catalogs.query_region(
+                target_coord,
+                radius=rad_arcsec * u.arcsec,
+                catalog="Gaia",
+                version=3,
+            ).to_pandas()
+            self.gaia_sources["distance"] = self.gaia_sources[
+                "distance"
+            ] * u.arcmin.to(u.arcsec)
+        self.gaia_sources = self.gaia_sources[
+            self.gaia_sources["distance"] <= rad_arcsec
+        ]
+        assert len(self.gaia_sources) > 1, "gaia_sources contains single entry"
+        return self.gaia_sources
+
+    def params_to_dict(self):
+        return {
+            "rstar": self.rstar,
+            "mstar": self.rstar,
+            "rhostar": self.rhostar,
+            "teff": self.teff,
+            "logg": self.logg,
+            "feh": self.feh,
+        }
+
+
+@dataclass
+class Planet(Star):
+    name: str
+    alias: str = ".01"
+    star_params: Dict[str, Tuple[float, float]]
+    planet_params: Dict[str, Tuple[float, float]] = None
+    source: str = "toi"
+
+    def __post_init__(self):
+        if self.planet_params is None:
+            self.get_planet_params()
+
+    def get_planet_params(self):
+        if not hasattr(self, "data_json"):
+            data_json = self.get_tfop_data()
+
+        sources = set(
+            [
+                p.get("prov")
+                for i, p in enumerate(data_json["planet_parameters"])
+            ]
+        )
+        errmsg = f"{self.source} must be in {sources}"
+        assert self.source in sources, errmsg
+
+        # try:
+        #     idx = int(self.alias.replace('.', ''))
+        # except:
+        #     idx = 1
+        idx = 1
+        for i, p in enumerate(data_json["planet_parameters"]):
+            if p.get("prov") == self.source:
+                idx = i + 1
+                break
+        planet_params = data_json["planet_parameters"][idx]
+
+        try:
+            self.t0 = tuple(
+                map(
+                    float,
+                    (
+                        planet_params.get("epoch", np.nan),
+                        planet_params.get("epoch_e", 0.1),
+                    ),
+                )
+            )
+            self.period = tuple(
+                map(
+                    float,
+                    (
+                        planet_params.get("per", np.nan),
+                        planet_params.get("per_e", 0.1),
+                    ),
+                )
+            )
+            self.tdur = (
+                np.array(
+                    tuple(
+                        map(
+                            float,
+                            (
+                                planet_params.get("tdur", 0),
+                                planet_params.get("dur_e", 0),
+                            ),
+                        )
+                    )
+                )
+                / 24
+            )
+            self.rprs = np.sqrt(
+                np.array(
+                    tuple(
+                        map(
+                            float,
+                            (
+                                planet_params.get("dep_p", 0),
+                                planet_params.get("dep_p_e", 0),
+                            ),
+                        )
+                    )
+                )
+                / 1e6
+            )
+            self.imp = tuple(
+                map(
+                    float,
+                    (
+                        (
+                            0
+                            if planet_params.get("imp", 0) == ""
+                            else planet_params.get("imp", 0)
+                        ),
+                        (
+                            0.1
+                            if planet_params.get("imp_e", 0.1) == ""
+                            else planet_params.get("imp_e", 0.1)
+                        ),
+                    ),
+                )
+            )
+            print(f"t0={self.t0} BJD\nP={self.period} d\nRp/Rs={self.rprs}")
+            rhostar = self.star_params["rhostar"]
+            self.a_Rs = (
+                (rhostar[0] / 0.01342 * self.period[0] ** 2) ** (1 / 3),
+                1
+                / 3
+                * (1 / 0.01342 * self.period[0] ** 2) ** (1 / 3)
+                * rhostar[0] ** (-2 / 3)
+                * rhostar[1],
+            )
+        except:
+            raise ValueError(f"Check exofop: {self.exofop_url}")
+
+    def params_to_dict(self):
+        return {
+            "t0": self.t0,
+            "period": self.period,
+            "tdur": self.tdur,
+            "imp": self.imp,
+            "rprs": self.rprs,
+            "a_Rs": self.a_Rs,
+        }
+
+
+def get_tfop_data(target_name: str) -> dict:
+    base_url = "https://exofop.ipac.caltech.edu/tess"
+    url = f"{base_url}/target.php?id={target_name.replace(' ','')}&json"
+    response = urlopen(url)
+    assert response.code == 200, "Failed to get data from ExoFOP-TESS"
+    try:
+        data_json = json.loads(response.read())
+        return data_json
+    except Exception:
+        raise ValueError(f"No TIC data found for {target_name}")
+
+
+def get_params_from_tfop(
+    data_json, name="planet_parameters", idx=None
+) -> dict:
+    params_dict = data_json.get(name)
+    if idx is None:
+        key = "pdate" if name == "planet_parameters" else "sdate"
+        # get the latest parameter based on upload date
+        dates = []
+        for d in params_dict:
+            t = d.get(key)
+            dates.append(t)
+        df = pd.DataFrame({"date": dates})
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        idx = df["date"].idxmax()
+    return params_dict[idx]
+
+
+def get_tic_id(target_name: str) -> int:
+    return int(get_tfop_data(target_name)["basic_info"]["tic_id"])
+
+
+def get_toi_ephem(
+    target_name: str, idx: int = 1, params=["epoch", "per", "dur"]
+) -> list:
+    print(f"Querying ephemeris for {target_name}:")
+    r = get_tfop_data(target_name)
+    planet_params = r["planet_parameters"][idx]
+    vals = []
+    for p in params:
+        val = planet_params.get(p)
+        val = float(val) if val else 0.1
+        err = planet_params.get(p + "_e")
+        err = float(err) if err else 0.1
+        print(f"     {p}: {val}, {err}")
+        vals.append((val, err))
+    return vals
+
+
+def tdur_from_per_imp_aRs_k(per, imp, a_Rs, k):
+    inc = np.arccos(imp / a_Rs)
+    cosi = imp / a_Rs
+    sini = np.sqrt(1.0 - cosi**2)
+    return (
+        per
+        / np.pi
+        * np.arcsin(1.0 / a_Rs * np.sqrt((1.0 + k) ** 2 - imp**2) / sini)
+    )
+
+
+def r1r2_to_imp_k(r1, r2, k_lo=0.01, k_up=0.5):
+    """
+    Efficient Joint Sampling of Impact Parameters and
+    Transit Depths in Transiting Exoplanet Light Curves
+    Espinosa+2018: RNAAS, 2 209
+    https://iopscience.iop.org/article/10.3847/2515-5172/aaef38
+    """
+    Ar = (k_up - k_lo) / (2.0 + k_lo + k_up)
+    if r1 > Ar:
+        imp = (1.0 + k_lo) * (1.0 + ((r1 - 1.0) / (1.0 - Ar)))
+        k = (1.0 - r2) * k_lo + r2 * k_up
+    else:
+        q1 = r1 / Ar
+        imp = (1.0 + k_lo) + np.sqrt(q1) * r2 * (k_up - k_lo)
+        k = k_up + (k_lo - k_up) * np.sqrt(q1) * (1.0 - r2)
+    return imp, k
+
+
+def imp_k_to_r1r2(imp, k, k_lo=0.01, k_up=0.5):
+    """
+    Inverse function for r1r2_to_imp_k function.
+    """
+    Ar = (k_up - k_lo) / (2.0 + k_lo + k_up)
+    discriminant = 1.0 + 4.0 * (1.0 - Ar) * (imp - (1.0 + k_lo))
+
+    if discriminant >= 0:
+        # Case r1 > Ar
+        r1 = (1.0 + k_lo + np.sqrt(discriminant)) / (2.0 * (1.0 - Ar))
+        r2 = (k - (1.0 - r1) * k_lo) / (r1 * k_up)
+    else:
+        # Case r1 <= Ar
+        q1 = ((1.0 + k_lo) - imp) / (k_up - k_lo)
+        q2 = (k_up - k) / (k_up - k_lo * np.sqrt(q1))
+        r1 = Ar * q1
+        r2 = q2
+
+    return r1, r2
+
+
+def tdur_from_per_aRs_r1_r2(per, a_Rs, r1, r2):
+    imp, k = r1r2_to_imp_k(r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX)
+    inc = np.arccos(imp / a_Rs)
+    cosi = imp / a_Rs
+    sini = np.sqrt(1.0 - cosi**2)
+    return (
+        per
+        / np.pi
+        * np.arcsin(1.0 / a_Rs * np.sqrt((1.0 + k) ** 2 - imp**2) / sini)
+    )

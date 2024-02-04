@@ -1,0 +1,16 @@
+pre-commit
+pytest
+astropy
+astroquery
+scipy
+pandas
+pytransit
+arviz
+celerite
+ldtk
+matplotlib
+numpy
+aesthetic
+tqdm
+emcee
+corner

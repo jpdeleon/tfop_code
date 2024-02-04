@@ -1,7 +1,10 @@
-from setuptools import find_packages, setup
+from setuptools import setup, find_packages
 
 setup(
     name="tfop_code",
-    packages=find_packages(where="tfop"),
-    package_dir={"": "tfop"},
+    version="1.0",
+    description="code to analyze MuSCAT photometry for TFOP",
+    author="Jerome de Leon",
+    packages=find_packages(),
+    include_package_data=True,
 )
