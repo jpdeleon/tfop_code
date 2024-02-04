@@ -49,11 +49,16 @@ import corner
 from tqdm.autonotebook import tqdm
 from pytransit import QuadraticModel
 from ldtk import LDPSetCreator, BoxcarFilter
-from aesthetic.plot import set_style, savefig
-
+from aesthetic.plot import savefig
+# from aesthetic.plot import set_style
 # set_style("science")
-# sys.path.insert(0, "/ut3/muscat/src/AFPy")
-# import LC_funcs as lc
+
+try:
+    sys.path.insert(0, "/ut3/muscat/src/AFPy")
+    import LC_funcs as lc
+except:
+    print("/ut3/muscat/src/AFPy/LC_funcs.py not found!")
+    pass
 
 import seaborn as sb
 
@@ -90,6 +95,7 @@ colors = {
     "z": "red",
 }
 
+
 @dataclass
 class LPF:
     name: str
@@ -123,7 +129,9 @@ class LPF:
         if not Path(self.outdir).exists():
             Path(self.outdir).mkdir()
         self.outfile_prefix = f"{self.ticid}{self.alias}_20{self.date}"
-        self.outfile_prefix += f"_{self.inst}_{''.join(self.bands)}_{self.model}"
+        self.outfile_prefix += (
+            f"_{self.inst}_{''.join(self.bands)}_{self.model}"
+        )
         self._mcmc_samples = None
 
     def _validate_inputs(self):
@@ -694,7 +702,7 @@ class LPF:
             trend = np.polyval(c, z) + d[i] * (t - tc)
             models[b] = trend
         return models
-    
+
     def plot_raw_data(self, binsize=600 / 86400, figsize=None, ylims=None):
         figsize = (10, 10) if figsize is None else figsize
         fig = plt.figure(figsize=figsize)
@@ -760,7 +768,7 @@ class LPF:
             t = self.times[b]
             f = self.fluxes[b]
             e = self.flux_errs[b]
-            z = self.covariates[b]
+            # z = self.covariates[b]
             t0 = np.min(t)
             # transit
             flux_tr = self.transit_models[b].evaluate_ps(
@@ -862,14 +870,14 @@ class LPF:
     def plot_detrended_data_and_transit(
         self,
         pv: list,
-        title: str=None,
-        xlims: tuple=None,
-        ylims: tuple=None,
-        binsize: float=600 / 86400,
-        msize: int=5,
-        font_size: int=20,
-        title_height: float=0.95,
-        figsize: tuple=None,
+        title: str = None,
+        xlims: tuple = None,
+        ylims: tuple = None,
+        binsize: float = 600 / 86400,
+        msize: int = 5,
+        font_size: int = 20,
+        title_height: float = 0.95,
+        figsize: tuple = None,
     ):
         """
         pv : list
@@ -899,7 +907,7 @@ class LPF:
         ax = axs.flatten()
         depth = self.planet_params["rprs"][0] ** 2
         # unpack fixed parameters
-        per = self.period[0]
+        # per = self.period[0]
         # unpack free parameters
         tc, _, _, _, _ = self.unpack_parameters(pv)
 
@@ -1061,11 +1069,11 @@ class LPF:
 
         ############# Mid-transit
         tc = df["tc"].values - self.time_offset
-        tc_med = df["tc"].median() - self.time_offset
-        tc_percs = lc.percentile(tc)
+        # tc_med = df["tc"].median() - self.time_offset
+        # tc_percs = lc.percentile(tc)
 
         # posterior
-        n, bins, _ = ax[1].hist(
+        n, _, _ = ax[1].hist(
             tc, density=True, bins=nbins, zorder=5, label="Posterior"
         )
 
@@ -1122,11 +1130,6 @@ class LPF:
             2, self.nband, figsize=figsize, sharey="row", sharex="col"
         )
         plt.subplots_adjust(hspace=0.1, wspace=0)
-
-        x1 = [0.3, 0.5, 0.7]
-        x2 = [0.5, 0.7, 0.9]
-        y1 = [0.3, 0.6]
-        y2 = [0.6, 0.9]
 
         # unpack fixed parameters
         per = self.period[0]
@@ -2059,7 +2062,7 @@ def get_toi_ephem(
 
 
 def tdur_from_per_imp_aRs_k(per, imp, a_Rs, k):
-    inc = np.arccos(imp / a_Rs)
+    # inc = np.arccos(imp / a_Rs)
     cosi = imp / a_Rs
     sini = np.sqrt(1.0 - cosi**2)
     return (
@@ -2110,7 +2113,7 @@ def imp_k_to_r1r2(imp, k, k_lo=0.01, k_up=0.5):
 
 def tdur_from_per_aRs_r1_r2(per, a_Rs, r1, r2):
     imp, k = r1r2_to_imp_k(r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX)
-    inc = np.arccos(imp / a_Rs)
+    # inc = np.arccos(imp / a_Rs)
     cosi = imp / a_Rs
     sini = np.sqrt(1.0 - cosi**2)
     return (
