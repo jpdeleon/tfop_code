@@ -136,6 +136,8 @@ def test_lpf(sample_inputs):
         title_height=0.99,
     )
     assert isinstance(fig, Figure)
+    # fig = lpf_instance.plot_radii(*star_params['rstar'])
+    # assert isinstance(fig, Figure)
     # gaia_sources = star.get_gaia_sources(rad_arcsec=60)
     # fig = lpf_instance.plot_gaia_sources(ref_fits_file_path,
     #                             gaia_sources,

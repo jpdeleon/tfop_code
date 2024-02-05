@@ -1058,14 +1058,14 @@ class LPF:
             savefig(fig, outfile, dpi=300, writepdf=False)
         return fig
 
-    def plot_kde(self, vals, ax=None, color="C0", label="", fill=True):
+    def plot_kde(self, vals, ax=None, color="C0", label="", fill=True, alpha=0.5):
         if ax is None:
             _, ax = plt.subplots()
         kde = stats.gaussian_kde(vals)
         xmodel = np.linspace(min(vals), max(vals), 200)
         ax.plot(xmodel, kde(xmodel), lw=3, color=color, zorder=5, label=label)
         if fill:
-            ax.fill_between(xmodel, 0, kde(xmodel), color=color, alpha=0.5)
+            ax.fill_between(xmodel, 0, kde(xmodel), color=color, alpha=alpha)
         return max(kde(xmodel))
 
     def plot_final_fit(
