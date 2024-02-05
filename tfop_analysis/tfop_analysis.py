@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """
-Written by J.P. de Leon based on 
+Written by J.P. de Leon based on
 TFOP analysis code by A. Fukui.
 
-User-friedly features include: 
+User-friedly features include:
 * easy to fetch TFOP parameters
 * handles any number of bands
 * easy to switch between models
@@ -11,18 +11,21 @@ User-friedly features include:
   - specifying covariates (default=Airmass)
   - polynomial order of linear model (default=1)
 * shows useful plots: quicklook, raw data, posteriors, FOV, FOV with gaia sources, etc
-* implements new parameterization for efficient sampling of impact parameter and Rp/Rs 
+* implements new parameterization for efficient sampling of impact parameter and Rp/Rs
   (Espinosa+2018: https://iopscience.iop.org/article/10.3847/2515-5172/aaef38)
 
 Note:
-* To re-define the priors, manually edit `get_chi2_chromatic_transit` method within `LPF` class
+* To re-define the priors, manually edit
+  `get_chi2_chromatic_transit` method within `LPF` class
 
 TODO
 * use other optimizers e.g. PSO
-    - https://github.com/ljvmiranda921/pyswarms?tab=readme-ov-file    
+    - https://github.com/ljvmiranda921/pyswarms
 * parallelize for faster chi2 evaluation within mcmc
 """
-import os, sys, json
+import os
+import sys
+import json
 from typing import Dict, Tuple, List
 from urllib.request import urlopen
 from datetime import datetime
@@ -42,21 +45,19 @@ from astropy.visualization.wcsaxes import SphericalCircle  # , add_scalebar
 from astropy.coordinates import SkyCoord
 from astroquery.mast import Catalogs
 from aesthetic.plot import savefig
-
-# from numba import jit
 import emcee
 import corner
-from tqdm.autonotebook import tqdm
 from pytransit import QuadraticModel
 from ldtk import LDPSetCreator, BoxcarFilter
-from aesthetic.plot import savefig
+
 # from aesthetic.plot import set_style
 # set_style("science")
 
 try:
     sys.path.insert(0, "/ut3/muscat/src/AFPy")
     import LC_funcs as lc
-except:
+except Exception as e:
+    print(e)
     print("/ut3/muscat/src/AFPy/LC_funcs.py not found!")
     pass
 
@@ -129,9 +130,7 @@ class LPF:
         if not Path(self.outdir).exists():
             Path(self.outdir).mkdir()
         self.outfile_prefix = f"{self.ticid}{self.alias}_20{self.date}"
-        self.outfile_prefix += (
-            f"_{self.inst}_{''.join(self.bands)}_{self.model}"
-        )
+        self.outfile_prefix += f"_{self.inst}_{''.join(self.bands)}_{self.model}"
         self._mcmc_samples = None
 
     def _validate_inputs(self):
@@ -142,16 +141,10 @@ class LPF:
         assert isinstance(self.data[b], pd.DataFrame), errmsg
 
         # sort data in griz order
-        self.data = dict(
-            sorted(self.data.items(), key=lambda x: bands.index(x[0]))
-        )
-        self.obs_start = min(
-            [self.data[b]["BJD_TDB"].min() for b in self.data]
-        )
+        self.data = dict(sorted(self.data.items(), key=lambda x: bands.index(x[0])))
+        self.obs_start = min([self.data[b]["BJD_TDB"].min() for b in self.data])
         self.obs_end = max([self.data[b]["BJD_TDB"].max() for b in self.data])
-        self.bands = (
-            list(self.data.keys()) if self.bands is None else self.bands
-        )
+        self.bands = list(self.data.keys()) if self.bands is None else self.bands
         errmsg = f"`bands` can only use the given keys in `data`: {self.data.keys()}"
         assert len(self.bands) <= len(self.data.keys()), errmsg
         for b in self.bands:
@@ -183,9 +176,7 @@ class LPF:
                 self.time_offset = 2_450_000
             else:
                 self.time_offset = np.floor(self.obs_start)
-        errmsg = (
-            f"`time_offset` is too big. Observation ended at {self.obs_end}."
-        )
+        errmsg = f"`time_offset` is too big. Observation ended at {self.obs_end}."
         assert self.time_offset < self.obs_end, errmsg
 
         # update times
@@ -285,9 +276,7 @@ class LPF:
         if self.use_r1r2:
             imp = self.planet_params.get("imp", (0, 0.1))
             k = self.planet_params["rprs"]
-            r1, r2 = imp_k_to_r1r2(
-                imp[0], k[0], k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
-            )
+            r1, r2 = imp_k_to_r1r2(imp[0], k[0], k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX)
             r1_err, r2_err = imp_k_to_r1r2(
                 imp[1], k[1], k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
             )
@@ -315,9 +304,7 @@ class LPF:
             elif self.model == "achromatic":
                 params.update({"k": self.planet_params["rprs"]})
         self.d_idx = len(params)
-        params.update(
-            {"d_" + b: (self.lin_model_offsets[b], 0) for b in self.bands}
-        )
+        params.update({"d_" + b: (self.lin_model_offsets[b], 0) for b in self.bands})
         self.model_param_names = list(params.keys())
         self.ndim = len(params)
         self.model_params = params
@@ -326,9 +313,7 @@ class LPF:
     def _init_ldc(self):
         """initialize quadratic limb-darkening coefficients"""
         self.ldc = {}
-        self.ldtk_filters = [
-            BoxcarFilter(b, *filter_widths[b]) for b in self.bands
-        ]
+        self.ldtk_filters = [BoxcarFilter(b, *filter_widths[b]) for b in self.bands]
         sc = LDPSetCreator(
             teff=self.teff,
             logg=self.logg,
@@ -342,9 +327,7 @@ class LPF:
         qc, qe = ps.coeffs_qd()
         for i, b in enumerate(ps._filters):
             if self.DEBUG:
-                print(
-                    f"{ps._filters[i]}: q1,q2=({qc[i][0]:.2f}, {qc[i][1]:.2f})"
-                )
+                print(f"{ps._filters[i]}: q1,q2=({qc[i][0]:.2f}, {qc[i][1]:.2f})")
             self.ldc[b] = (qc[i][0], qc[i][1])
 
     def get_chi2_linear_baseline(self, p0):
@@ -386,9 +369,7 @@ class LPF:
         # print('npar(linear) = ', npar_lin)
         self.bic_lin = res_lin.fun + npar_lin * np.log(self.ndata)
         # print('BIC(linear) = ', self.bic_lin)
-        self.lin_model_offsets = {
-            b: res_lin.x[i] for i, b in enumerate(self.bands)
-        }
+        self.lin_model_offsets = {b: res_lin.x[i] for i, b in enumerate(self.bands)}
 
     def unpack_parameters(self, pv):
         """
@@ -446,16 +427,12 @@ class LPF:
             if np.any(k < PRIOR_K_MIN):
                 if self.DEBUG:
                     print(f"Error (k_min): {k:.2f}<{PRIOR_K_MIN}")
-                    print(
-                        f"You may need to decrease PRIOR_K_MIN={PRIOR_K_MIN}"
-                    )
+                    print(f"You may need to decrease PRIOR_K_MIN={PRIOR_K_MIN}")
                 return np.inf
             if np.any(k > PRIOR_K_MAX):
                 if self.DEBUG:
                     print(f"Error (k_max): {k:.2f}>{PRIOR_K_MAX}")
-                    print(
-                        f"You may need to increase PRIOR_K_MAX={PRIOR_K_MAX}"
-                    )
+                    print(f"You may need to increase PRIOR_K_MAX={PRIOR_K_MAX}")
                 return np.inf
             if (imp < 0.0) or (imp > 1.0):
                 if self.DEBUG:
@@ -477,16 +454,16 @@ class LPF:
         # assumes transit occurs within window
         if (tc < self.obs_start) or (tc > self.obs_end):
             if self.DEBUG:
-                print(
-                    f"Error (tc outside data): {self.obs_start:.4f}>{tc:.4f}>{self.obs_start:.4f}"
-                )
+                errmsg = "Error (tc outside data): "
+                errmsg += f"{self.obs_start:.4f}>{tc:.4f}>{self.obs_start:.4f}"
+                print(errmsg)
             return np.inf
         # tc shouldn't be more or less than half a period
         if (tc > 0.0) and (abs(tc - self.obs_start) > per / 2.0):
             if self.DEBUG:
-                print(
-                    f"Error (tc more than half of period): {tc}-{self.obs_start:.4f} > {per/2:.4f}"
-                )
+                errmsg = f"Error (tc more than half of period): "
+                errmsg += f"{tc}-{self.obs_start:.4f} > {per/2:.4f}"
+                print(errmsg)
             return np.inf
         chi2 = 0.0
         for i, b in enumerate(self.bands):
@@ -505,8 +482,9 @@ class LPF:
         # add normal priors
         # if tc > 0.:
         #     chi2 += ((tc - self.tc[0])/self.tc[1])**2
+        # a_Rs0 = self.planet_params['a_Rs']
         # if a_Rs > 0.:
-        #     chi2 += ((a_Rs - self.planet_params['a_Rs'][0])/self.planet_params['a_Rs'][1])**2
+        #     chi2 += ((a_Rs - a_Rs)[0])/a_Rso[1])**2
         if tdur > 0.0:
             chi2 += ((tdur - self.tdur[0]) / self.tdur[1]) ** 2
         return chi2
@@ -553,8 +531,7 @@ class LPF:
         params = self.optimum_params if pv is None else pv
         assert len(params) == self.ndim
         pos = [
-            params + 1e-5 * np.random.randn(self.ndim)
-            for i in range(self.nwalkers)
+            params + 1e-5 * np.random.randn(self.ndim) for i in range(self.nwalkers)
         ]
         with Pool(self.ndim) as pool:
             self.sampler = emcee.EnsembleSampler(
@@ -736,9 +713,7 @@ class LPF:
         ax.legend()
         return fig
 
-    def plot_lightcurves(
-        self, pv, binsize=600 / 86400, ylims=None, figsize=None
-    ):
+    def plot_lightcurves(self, pv, binsize=600 / 86400, ylims=None, figsize=None):
         """
         pv : list
             parameter vector from MCMC or optimization
@@ -833,9 +808,7 @@ class LPF:
         axes[-1].set_xlabel("step number")
         return fig
 
-    def plot_corner(
-        self, transform=False, discard=1, thin=1, start=0, end=None
-    ):
+    def plot_corner(self, transform=False, discard=1, thin=1, start=0, end=None):
         """
         corner plot of MCMC chain
 
@@ -924,9 +897,7 @@ class LPF:
             ax[i].errorbar(
                 (tbin - tc) * 24, ybin, yerr=yebin, fmt="ok", markersize=msize
             )
-            xmodel, ymodel = self.get_upsampled_transit_models(
-                pv, npoints=500
-            )[b]
+            xmodel, ymodel = self.get_upsampled_transit_models(pv, npoints=500)[b]
             ax[i].plot((xmodel - tc) * 24, ymodel, "-", lw=3, color=colors[b])
             ax[i].axhline(
                 1 - depth,
@@ -1057,10 +1028,12 @@ class LPF:
             transform=ax[0].transAxes,
             fontsize=font_size * 1.5,
         )
+        text = f"{self.model.title()} transit fit, "
+        text += f"$\Delta$BIC (non-transit - transit) = {self.bic_delta:.1f}"
         ax[0].text(
             0.0,
             1.05,
-            f"{self.model.title()} transit fit,  $\Delta$BIC (non-transit - transit) = {self.bic_delta:.1f}",
+            text,
             horizontalalignment="left",
             verticalalignment="center",
             transform=ax[0].transAxes,
@@ -1079,9 +1052,7 @@ class LPF:
 
         # prediction
         tc0, tc_err0 = self.tc
-        xmodel = np.linspace(
-            tc0 - nsigma * tc_err0, tc0 + nsigma * tc_err0, 200
-        )
+        xmodel = np.linspace(tc0 - nsigma * tc_err0, tc0 + nsigma * tc_err0, 200)
         ymodel = max(n) * np.exp(-((xmodel - tc0) ** 2) / tc_err0**2)
         ax[1].plot(xmodel, ymodel, label="Prediction", lw=3, zorder=5)
         ax[1].set_xlabel(
@@ -1093,9 +1064,7 @@ class LPF:
 
         imp = df["imp"].values
         _ = ax[2].hist(imp, density=True, bins=nbins)
-        ax[2].set_xlabel(
-            "Impact parameter", labelpad=25, fontsize=font_size * 1.5
-        )
+        ax[2].set_xlabel("Impact parameter", labelpad=25, fontsize=font_size * 1.5)
         ax[2].set_title(
             f"{self.date4plot}, {self.inst}",
             loc="right",
@@ -1144,9 +1113,7 @@ class LPF:
                 r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
             )
         else:
-            tc_best, a_Rs_best, imp_best, k_best, d_best = (
-                self.unpack_parameters(pv)
-            )
+            tc_best, a_Rs_best, imp_best, k_best, d_best = self.unpack_parameters(pv)
 
         # derived
         inc_best = np.arccos(imp_best / a_Rs_best)
@@ -1169,9 +1136,7 @@ class LPF:
             # raw and binned data
             tbin, ybin, yebin = lc.binning_equal_interval(t, f, e, binsize, t0)
             ax[0, i].plot(t, f, ".k", alpha=0.1)
-            ax[0, i].errorbar(
-                tbin, ybin, yerr=yebin, fmt="ok", markersize=msize
-            )
+            ax[0, i].errorbar(tbin, ybin, yerr=yebin, fmt="ok", markersize=msize)
 
             # plot each random mcmc samples
             rand = np.random.randint(len(fc), size=nsamples)
@@ -1227,9 +1192,7 @@ class LPF:
             )
             # detrended flux
             ax[1, i].plot(t, f / trends_best[b], ".k", alpha=0.1)
-            ax[1, i].errorbar(
-                tbin, ybin, yerr=yebin, fmt="ok", markersize=msize
-            )
+            ax[1, i].errorbar(tbin, ybin, yerr=yebin, fmt="ok", markersize=msize)
             # super sampled best-fit transit model
             xmodel, ymodel = transits_best[b]
             ax[1, i].plot(xmodel, ymodel, color=colors[b], linewidth=3)
@@ -1410,9 +1373,7 @@ class LPF:
         pixscale = header["PIXSCALE"]
         band = header["FILTER"]
         title = (
-            f"{self.name}\n{self.inst} {band[0]}-band"
-            if title is None
-            else title
+            f"{self.name}\n{self.inst} {band[0]}-band" if title is None else title
         )
 
         fig = plt.figure(figsize=figsize)
@@ -1536,9 +1497,7 @@ class LPF:
         refxy = df[["x", "y"]].values
         coords = wcs.all_pix2world(refxy, 0)
         # filter those within zoom_rad_arcsec
-        sep = SkyCoord(coords * u.deg).separation(
-            SkyCoord(ra, dec, unit="deg")
-        )
+        sep = SkyCoord(coords * u.deg).separation(SkyCoord(ra, dec, unit="deg"))
         idx = sep < zoom_rad_arcsec * u.arcsec
         coords = coords[idx]
         star_ids = star_ids[idx]
@@ -1552,9 +1511,7 @@ class LPF:
         fig = plt.figure(figsize=figsize)
         fig.subplots_adjust(top=title_height)
         ax = fig.add_subplot(111, projection=wcscrop)
-        norm = ImageNormalize(
-            dcrop, interval=ZScaleInterval(contrast=contrast)
-        )
+        norm = ImageNormalize(dcrop, interval=ZScaleInterval(contrast=contrast))
         ax.imshow(dcrop, norm=norm, origin="lower", cmap=cmap)
 
         # target
@@ -1603,9 +1560,7 @@ class LPF:
             bar_arcsec = bar_arcsec if bar_arcsec else zoom_rad_arcsec // 2
             imsize = dcrop.shape
             sx, sy = int(imsize[0] * 0.3), int(imsize[1] * 0.1)
-            ax.hlines(
-                sy, sx - bar_arcsec / pixscale, sx, color=scale_color, lw=3
-            )
+            ax.hlines(sy, sx - bar_arcsec / pixscale, sx, color=scale_color, lw=3)
             ax.annotate(
                 text=f'{bar_arcsec}"',
                 xy=(sx - bar_arcsec / pixscale, sy + 10),
@@ -1663,9 +1618,7 @@ class LPF:
         pixscale = header["PIXSCALE"]
         band = header["FILTER"]
         title = (
-            f"{self.name}\n{self.inst} {band[0]}-band"
-            if title is None
-            else title
+            f"{self.name}\n{self.inst} {band[0]}-band" if title is None else title
         )
 
         # zoomed-in image
@@ -1682,9 +1635,7 @@ class LPF:
             top=title_height
         )  # Adjusted subplots_adjust to give more space to the title
         ax = fig.add_subplot(111, projection=wcscrop)
-        norm = ImageNormalize(
-            dcrop, interval=ZScaleInterval(contrast=contrast)
-        )
+        norm = ImageNormalize(dcrop, interval=ZScaleInterval(contrast=contrast))
         ax.imshow(dcrop, norm=norm, origin="lower", cmap=cmap)
 
         coords = gaia_sources[["ra", "dec"]].values
@@ -1719,9 +1670,7 @@ class LPF:
         if show_scale_bar:
             imsize = dcrop.shape
             sx, sy = int(imsize[0] * 0.3), int(imsize[1] * 0.1)
-            ax.hlines(
-                sy, sx - bar_arcsec / pixscale, sx, color=scale_color, lw=3
-            )
+            ax.hlines(sy, sx - bar_arcsec / pixscale, sx, color=scale_color, lw=3)
             ax.annotate(
                 text=f'{bar_arcsec}"',
                 xy=(sx - bar_arcsec / pixscale, sy + 10),
@@ -1739,9 +1688,7 @@ class LPF:
             ax.grid()
         fig.tight_layout()
         if save:
-            outfile = (
-                f"{self.outdir}/{self.outfile_prefix}_gaia_sources{suffix}"
-            )
+            outfile = f"{self.outdir}/{self.outfile_prefix}_gaia_sources{suffix}"
             savefig(fig, outfile, dpi=300, writepdf=False)
         return fig
 
@@ -1823,9 +1770,7 @@ class Star:
             )
             print(f"Mstar=({self.mstar[0]:.2f},{self.mstar[1]:.2f}) Msun")
             print(f"Rstar=({self.rstar[0]:.2f},{self.rstar[1]:.2f}) Rsun")
-            print(
-                f"Rhostar=({self.rhostar[0]:.2f},{self.rhostar[1]:.2f}) rhosun"
-            )
+            print(f"Rhostar=({self.rhostar[0]:.2f},{self.rhostar[1]:.2f}) rhosun")
             self.teff = tuple(
                 map(
                     float,
@@ -1852,15 +1797,16 @@ class Star:
             print(f"teff=({self.teff[0]:.0f},{self.teff[1]:.0f}) K")
             print(f"logg=({self.logg[0]:.2f},{self.logg[1]:.2f}) cgs")
             print(f"feh=({self.feh[0]:.2f},{self.feh[1]:.2f}) dex")
-        except:
+        except Exception as e:
+            print(e)
             raise ValueError(f"Check exofop: {self.exofop_url}")
 
     def get_gaia_sources(self, rad_arcsec=30):
         target_coord = SkyCoord(ra=self.ra * u.deg, dec=self.dec * u.deg)
         if (not hasattr(self, "gaia_sources")) or (rad_arcsec > 30):
-            print(
-                f'Querying Gaia sources {rad_arcsec}" around {self.name}: ({self.ra:.4f}, {self.dec:.4f}) deg.'
-            )
+            msg = f'Querying Gaia sources {rad_arcsec}" around {self.name}: '
+            msg += f"({self.ra:.4f}, {self.dec:.4f}) deg."
+            print(msg)
             self.gaia_sources = Catalogs.query_region(
                 target_coord,
                 radius=rad_arcsec * u.arcsec,
@@ -1896,18 +1842,14 @@ class Planet(Star):
     source: str = "toi"
 
     def __post_init__(self):
-        if self.planet_params is None:
-            self.get_planet_params()
+        self.get_planet_params()
 
     def get_planet_params(self):
         if not hasattr(self, "data_json"):
             data_json = self.get_tfop_data()
 
         sources = set(
-            [
-                p.get("prov")
-                for i, p in enumerate(data_json["planet_parameters"])
-            ]
+            [p.get("prov") for i, p in enumerate(data_json["planet_parameters"])]
         )
         errmsg = f"{self.source} must be in {sources}"
         assert self.source in sources, errmsg
@@ -1997,7 +1939,8 @@ class Planet(Star):
                 * rhostar[0] ** (-2 / 3)
                 * rhostar[1],
             )
-        except:
+        except Exception as e:
+            print(e)
             raise ValueError(f"Check exofop: {self.exofop_url}")
 
     def params_to_dict(self):
@@ -2023,9 +1966,7 @@ def get_tfop_data(target_name: str) -> dict:
         raise ValueError(f"No TIC data found for {target_name}")
 
 
-def get_params_from_tfop(
-    data_json, name="planet_parameters", idx=None
-) -> dict:
+def get_params_from_tfop(data_json, name="planet_parameters", idx=None) -> dict:
     params_dict = data_json.get(name)
     if idx is None:
         key = "pdate" if name == "planet_parameters" else "sdate"
