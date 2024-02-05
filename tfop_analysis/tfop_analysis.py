@@ -52,14 +52,13 @@ from ldtk import LDPSetCreator, BoxcarFilter
 
 # from aesthetic.plot import set_style
 # set_style("science")
-
-try:
-    sys.path.insert(0, "/ut3/muscat/src/AFPy")
-    import LC_funcs as lc
-except Exception as e:
-    print(e)
-    print("/ut3/muscat/src/AFPy/LC_funcs.py not found!")
-    pass
+# try:
+#     sys.path.insert(0, "/ut3/muscat/src/AFPy")
+#     import LC_funcs as lc
+# except Exception as e:
+#     print(e)
+#     print("/ut3/muscat/src/AFPy/LC_funcs.py not found!")
+#     pass
 
 import seaborn as sb
 
@@ -680,8 +679,7 @@ class LPF:
             models[b] = trend
         return models
 
-    def plot_raw_data(self, binsize=600 / 86400, figsize=None, ylims=None):
-        figsize = (10, 10) if figsize is None else figsize
+    def plot_raw_data(self, binsize=600 / 86400, figsize=(10, 10), ylims=None):
         fig = plt.figure(figsize=figsize)
         ncol = 2 if self.nband > 1 else 1
         nrow = 2 if self.nband > 2 else 1
@@ -695,7 +693,7 @@ class LPF:
                 alpha=0.1,
                 label="raw data",
             )
-            tbin, ybin, yebin = lc.binning_equal_interval(
+            tbin, ybin, yebin = binning_equal_interval(
                 self.times[b], self.fluxes[b], self.flux_errs[b], binsize, t0
             )
             ax.errorbar(tbin, ybin, yerr=yebin, marker="o", c=colors[b], ls="")
@@ -713,7 +711,7 @@ class LPF:
         ax.legend()
         return fig
 
-    def plot_lightcurves(self, pv, binsize=600 / 86400, ylims=None, figsize=None):
+    def plot_lightcurves(self, pv, binsize=600 / 86400, ylims=None, figsize=(8, 5)):
         """
         pv : list
             parameter vector from MCMC or optimization
@@ -722,7 +720,6 @@ class LPF:
 
         See also `plot_detrended_data_and_transit()`
         """
-        figsize = (8, 5) if figsize is None else figsize
         assert len(pv) == self.ndim
         # unpack fixed parameters
         per = self.period[0]
@@ -751,7 +748,7 @@ class LPF:
             )
 
             # raw data and binned
-            tbin, ybin, yebin = lc.binning_equal_interval(t, f, e, binsize, t0)
+            tbin, ybin, _ = binning_equal_interval(t, f, e, binsize, t0)
 
             ax[0].plot(t, f, ".k", alpha=0.1)
             ax[0].plot(tbin, ybin, "o", color=colors[b], alpha=0.5)
@@ -763,9 +760,7 @@ class LPF:
                 ax[0].set_ylim(*ylims)
 
             # detrended and binned
-            tbin, ybin, yebin = lc.binning_equal_interval(
-                t, f / trends[b], e, binsize, t0
-            )
+            tbin, ybin, _ = binning_equal_interval(t, f / trends[b], e, binsize, t0)
             ax[1].plot(t, f / trends[b], ".k", alpha=0.1)
             ax[1].plot(tbin, ybin, "o", color=colors[b], alpha=0.5)
             # upsampled transit
@@ -786,7 +781,7 @@ class LPF:
             fig.suptitle(f"{b}-band")
         return fig
 
-    def plot_chain(self, start=0, end=None, figsize=None):
+    def plot_chain(self, start=0, end=None, figsize=(10, 10)):
         """
         visualize MCMC walkers
 
@@ -796,7 +791,6 @@ class LPF:
             parameter id
         """
         end = self.ndim if end is None else end
-        figsize = (10, 10) if figsize is None else figsize
         fig, axes = plt.subplots(end - start, figsize=figsize, sharex=True)
         samples = self.sampler.get_chain()
         for i in np.arange(start, end):
@@ -850,7 +844,7 @@ class LPF:
         msize: int = 5,
         font_size: int = 20,
         title_height: float = 0.95,
-        figsize: tuple = None,
+        figsize: tuple = (10, 10),
     ):
         """
         pv : list
@@ -866,7 +860,6 @@ class LPF:
             if title is None
             else title
         )
-        figsize = (10, 10) if figsize is None else figsize
         ncols = 2 if self.nband > 1 else 1
         nrows = 2 if self.nband > 2 else 1
         fig, axs = plt.subplots(
@@ -891,7 +884,7 @@ class LPF:
             detrended_flux = f / self.get_trend_models(pv)[b]
             ax[i].plot((t - tc) * 24, detrended_flux, "k.", alpha=0.2)
             # raw data and binned
-            tbin, ybin, yebin = lc.binning_equal_interval(
+            tbin, ybin, yebin = binning_equal_interval(
                 t, detrended_flux, e, binsize, tc
             )
             ax[i].errorbar(
@@ -943,7 +936,7 @@ class LPF:
     def plot_posteriors(
         self,
         title: str = None,
-        figsize: tuple = None,
+        figsize: tuple = (12, 5),
         font_size: float = 12,
         nsigma: float = 3,
         nbins: int = 50,
@@ -956,8 +949,6 @@ class LPF:
         errmsg = "Valid only for chromatic model"
         if not self.model == "chromatic":
             raise ValueError(errmsg)
-
-        figsize = (12, 5) if figsize is None else figsize
         title = (
             f"{self.name}{self.alias} (TIC{self.ticid}{self.alias})"
             if title is None
@@ -973,7 +964,7 @@ class LPF:
         for i, b in enumerate(self.bands):
             k = df["k_" + b].values
             k_med = df["k_" + b].median()
-            k_percs = lc.percentile(k)
+            k_percs = percentile(k)
             # med, low1, hig1, low2, hig2, low3, hig3
             k_err1 = k_percs[0] - k_percs[1], k_percs[2] - k_percs[0]
             k_err2 = k_percs[0] - k_percs[3], k_percs[4] - k_percs[0]
@@ -1043,7 +1034,7 @@ class LPF:
         ############# Mid-transit
         tc = df["tc"].values - self.time_offset
         # tc_med = df["tc"].median() - self.time_offset
-        # tc_percs = lc.percentile(tc)
+        # tc_percs = percentile(tc)
 
         # posterior
         n, _, _ = ax[1].hist(
@@ -1086,7 +1077,7 @@ class LPF:
         msize: int = 5,
         font_size: int = 25,
         title: str = None,
-        figsize: tuple = None,
+        figsize: tuple = (16, 12),
         binsize: float = 600 / 86400,
         save: bool = False,
         suffix: str = ".pdf",
@@ -1094,7 +1085,6 @@ class LPF:
         ymin1, ymax1 = ylims_top
         ymin2, ymax2 = ylims_bottom
 
-        figsize = (16, 12) if figsize is None else figsize
         fig, ax = plt.subplots(
             2, self.nband, figsize=figsize, sharey="row", sharex="col"
         )
@@ -1134,7 +1124,7 @@ class LPF:
             t0 = np.min(t)
 
             # raw and binned data
-            tbin, ybin, yebin = lc.binning_equal_interval(t, f, e, binsize, t0)
+            tbin, ybin, yebin = binning_equal_interval(t, f, e, binsize, t0)
             ax[0, i].plot(t, f, ".k", alpha=0.1)
             ax[0, i].errorbar(tbin, ybin, yerr=yebin, fmt="ok", markersize=msize)
 
@@ -1187,7 +1177,7 @@ class LPF:
                 w=0,
             )
 
-            tbin, ybin, yebin = lc.binning_equal_interval(
+            tbin, ybin, yebin = binning_equal_interval(
                 t, f / trends_best[b], e, binsize, t0
             )
             # detrended flux
@@ -1345,7 +1335,7 @@ class LPF:
         show_scale_bar: bool = True,
         marker_color: str = "yellow",
         scale_color: str = "w",
-        figsize: tuple = None,
+        figsize: tuple = (10, 10),
         show_grid: bool = True,
         save: bool = False,
         suffix: str = ".pdf",
@@ -1353,7 +1343,6 @@ class LPF:
         """
         Field of View given reference image produced by AFPHOT pipeline
         """
-        figsize = (10, 10) if figsize is None else figsize
         dr, dd = text_offset
 
         header = fits.getheader(ref_fits_file_path)
@@ -1463,7 +1452,7 @@ class LPF:
         bar_arcsec=None,
         marker_color: str = "yellow",
         scale_color: str = "w",
-        figsize: tuple = None,
+        figsize: tuple = (10, 10),
         show_grid: bool = True,
         save: bool = False,
         suffix: str = ".pdf",
@@ -1471,7 +1460,6 @@ class LPF:
         """
         Zoomed-in FOV
         """
-        figsize = (10, 10) if figsize is None else figsize
         dr, dd = text_offset
 
         header = fits.getheader(ref_fits_file_path)
@@ -1592,7 +1580,7 @@ class LPF:
         text_offset: tuple = (0, 0),
         fov_padding: float = 1.1,
         title_height: float = 1,
-        figsize: tuple = None,
+        figsize: tuple = (10, 10),
         title: str = None,
         marker_color: str = "yellow",
         scale_color: str = "w",
@@ -1611,7 +1599,6 @@ class LPF:
         See also `Star.get_gaia_sources()`
         """
         dr, dd = text_offset
-        figsize = (10, 10) if figsize is None else figsize
         header = fits.getheader(fits_file_path)
         data = fits.getdata(fits_file_path)
         wcs = WCS(header)
@@ -2062,3 +2049,119 @@ def tdur_from_per_aRs_r1_r2(per, a_Rs, r1, r2):
         / np.pi
         * np.arcsin(1.0 / a_Rs * np.sqrt((1.0 + k) ** 2 - imp**2) / sini)
     )
+
+
+def binning_equal_interval(t, y, ye, binsize, t0):
+    intt = np.floor((t - t0) / binsize)
+    intt_unique = np.unique(intt)
+    n_unique = len(intt_unique)
+    tbin = np.zeros(n_unique)
+    ybin = np.zeros(n_unique)
+    yebin = np.zeros(n_unique)
+
+    for i in range(n_unique):
+        index = np.where(intt == intt_unique[i])
+        tbin[i] = t0 + float(intt_unique[i]) * binsize + 0.5 * binsize
+        w = 1 / ye[index] / ye[index]
+        ybin[i] = np.sum(y[index] * w) / np.sum(w)
+        yebin[i] = np.sqrt(1 / np.sum(w))
+
+    return tbin, ybin, yebin
+
+
+def percentile(array):
+    med = np.median(array)
+    low1 = np.percentile(array, 15.85)
+    hig1 = np.percentile(array, 84.15)
+    low2 = np.percentile(array, 2.275)
+    hig2 = np.percentile(array, 97.725)
+    low3 = np.percentile(array, 0.135)
+    hig3 = np.percentile(array, 99.865)
+    return med, low1, hig1, low2, hig2, low3, hig3
+
+
+def plot_ql(
+    df: pd.DataFrame,
+    exptime: float = 10,
+    title: str = None,
+    mcolor: str = None,
+    binsize: float = 600 / 86400,
+    toffset: float = None,
+    figsize: tuple = (8, 8),
+    font_size: float = 16,
+    title_height=1,
+    zlims: tuple = (1, 2.5),
+    debug: bool = False,
+):
+    fig, axs = plt.subplots(6, 1, figsize=figsize, tight_layout=True, sharex=True)
+    axs = axs.flatten()
+    if zlims:
+        idx = (df["Airmass"] >= zlims[0]) & (df["Airmass"] <= zlims[1])
+    else:
+        idx = np.ones_like(df["Airmass"])
+
+    if debug:
+        print(sum(idx))
+
+    if toffset is None:
+        toffset = int(df["BJD_TDB"].min())
+    t, f, e = (
+        df.loc[idx, "BJD_TDB"] - toffset,
+        df.loc[idx, "Flux"],
+        df.loc[idx, "Err"],
+    )
+
+    binsize_mins = binsize * u.day.to(u.minute)
+    t2, f2, e2 = binning_equal_interval(
+        t.values, f.values, e.values, binsize, t0=toffset
+    )
+
+    ax = axs[0]
+    p = "Flux"
+    ax.plot(t, df.loc[idx, p], "k.", alpha=0.1)
+    ax.errorbar(
+        t2,
+        f2,
+        yerr=e2,
+        fmt="o",
+        markersize=5,
+        color=mcolor,
+        label=f"{binsize_mins}-min bin",
+    )
+
+    factor = binsize / exptime
+    rms = np.std(np.diff(df.loc[idx, p])) * 1e3 / np.sqrt(factor)
+    text = f"rms={rms:.2f} ppt/{binsize_mins:.1f} min"
+
+    ax.set_title(text)
+    ax.set_ylabel("Normalized flux")
+
+    p = "Airmass"
+    ax = axs[1]
+    ax.plot(t, df.loc[idx, p], "k-")
+    ax.set_ylabel(p)
+
+    p = "DX(pix)"
+    ax = axs[2]
+    ax.plot(t, df.loc[idx, p], "k-")
+    ax.set_ylabel(p)
+
+    p = "DY(pix)"
+    ax = axs[3]
+    ax.plot(t, df.loc[idx, p], "k-")
+    ax.set_ylabel(p)
+
+    p = "FWHM(pix)"
+    ax = axs[4]
+    ax.plot(t, df.loc[idx, p], "k-")
+    ax.set_ylabel(p)
+
+    p = "Peak(ADU)"
+    ax = axs[5]
+    ax.plot(t, df.loc[idx, p], "k-")
+    ax.set_xlabel(f"BJD_TDB - {toffset}")
+    ax.set_ylabel(p)
+
+    if title:
+        fig.suptitle(title, fontsize=font_size, y=title_height)
+    return fig

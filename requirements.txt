@@ -1,5 +1,6 @@
 pre-commit
 pytest
+matplotlib
 astropy
 astroquery
 scipy
@@ -8,7 +9,6 @@ pytransit
 arviz
 celerite
 ldtk
-matplotlib
 numpy
 aesthetic
 tqdm
