@@ -24,7 +24,6 @@ TODO
 * parallelize for faster chi2 evaluation within mcmc
 """
 import os
-import sys
 import json
 from typing import Dict, Tuple, List
 from urllib.request import urlopen
@@ -37,6 +36,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator
 import pandas as pd
 from scipy.optimize import minimize
+from scipy import stats
 from astropy.io import fits
 from astropy.visualization import ZScaleInterval, ImageNormalize
 from astropy.wcs import WCS
@@ -47,6 +47,7 @@ from astroquery.mast import Catalogs
 from aesthetic.plot import savefig
 import emcee
 import corner
+import seaborn as sb
 from pytransit import QuadraticModel
 from ldtk import LDPSetCreator, BoxcarFilter
 
@@ -571,7 +572,7 @@ class LPF:
         # fc = self.sampler.get_chain(flat=True, discard=discard, thin=thin).copy()
         if hasattr(self, "mcmc_samples"):
             fc = self.sampler.flatchain.copy()
-            names = self.model_param_names.copy()
+            param_names = self.model_param_names.copy()
             fc = fc.reshape(self.nsteps, self.nwalkers, -1)
             fc = fc[discard::thin].reshape(-1, self.ndim)
             df = pd.DataFrame(fc, columns=self.model_param_names)
@@ -603,10 +604,10 @@ class LPF:
                     df["k"] = ks
                     df = df.drop(labels=col, axis=1)
                 df["imp"] = imps
-                names = [s.replace("r1", "imp") for s in names]
-                names = [s.replace("r2", "k") for s in names]
-            self._mcmc_samples = df[names]
-            return df[names]
+                param_names = [s.replace("r1", "imp") for s in param_names]
+                param_names = [s.replace("r2", "k") for s in param_names]
+            self._mcmc_samples = df[param_names]
+            return df[param_names]
         else:
             return self.mcmc_samples[discard::thin]
 
@@ -802,7 +803,7 @@ class LPF:
         axes[-1].set_xlabel("step number")
         return fig
 
-    def plot_corner(self, transform=False, discard=1, thin=1, start=0, end=None):
+    def plot_corner(self, transform=True, discard=1, thin=1, start=0, end=None):
         """
         corner plot of MCMC chain
 
@@ -816,14 +817,15 @@ class LPF:
         end = self.ndim if end is None else end
         if self.use_r1r2 and transform:
             df = self.get_mcmc_samples(discard=discard, thin=thin)
-            labels = df.columns.copy()
-            labels[0] = f"{labels[0]}-{self.time_offset:,}"
+            labels = df.columns.values.copy()
+            labels[0] = f"tc-{self.time_offset:,}"
             df["tc"] = df["tc"].values - self.time_offset
-            cols = labels[start:end]
-            fig = corner.corner(df[cols], labels=cols, show_titles=True)
+            fig = corner.corner(
+                df.iloc[:, start:end], labels=labels[start:end], show_titles=True
+            )
         else:
             labels = self.model_param_names.copy()
-            labels[0] = f"{labels[0]}-{self.time_offset:,}"
+            labels[0] = f"tc-{self.time_offset:,}"
             # fc = self.sampler.get_chain(flat=True, discard=discard, thin=thin)
             fc = self.sampler.flatchain.copy()
             if discard > 1:
@@ -939,7 +941,6 @@ class LPF:
         figsize: tuple = (12, 5),
         font_size: float = 12,
         nsigma: float = 3,
-        nbins: int = 50,
         save: bool = False,
         suffix: str = ".pdf",
     ):
@@ -1007,7 +1008,7 @@ class LPF:
         ax[0].set_xlim(-0.5, 3.5)
         ax[0].set_xticks(range(self.nband))
         ax[0].set_xticklabels(self.bands)
-        ax[0].set_xlabel("Band", labelpad=25, fontsize=font_size * 1.5)
+        ax[0].set_xlabel("Band", fontsize=font_size * 1.5)
         ax[0].set_ylabel("Radius ratio", fontsize=font_size * 1.5)
 
         ax[0].text(
@@ -1030,42 +1031,42 @@ class LPF:
             transform=ax[0].transAxes,
             fontsize=font_size,
         )
-
         ############# Mid-transit
-        tc = df["tc"].values - self.time_offset
-        # tc_med = df["tc"].median() - self.time_offset
-        # tc_percs = percentile(tc)
-
         # posterior
-        n, _, _ = ax[1].hist(
-            tc, density=True, bins=nbins, zorder=5, label="Posterior"
-        )
-
+        tc = df["tc"].values - self.time_offset
+        n = self.plot_kde(tc, ax=ax[1], label="Posterior")
         # prediction
         tc0, tc_err0 = self.tc
         xmodel = np.linspace(tc0 - nsigma * tc_err0, tc0 + nsigma * tc_err0, 200)
-        ymodel = max(n) * np.exp(-((xmodel - tc0) ** 2) / tc_err0**2)
-        ax[1].plot(xmodel, ymodel, label="Prediction", lw=3, zorder=5)
+        ymodel = n * np.exp(-((xmodel - tc0) ** 2) / tc_err0**2)
+        ax[1].plot(xmodel, ymodel, label="Prediction", color="C1", lw=3, zorder=0)
         ax[1].set_xlabel(
             f"Tc (BJD-{self.time_offset:.0f})",
-            labelpad=25,
             fontsize=font_size * 1.5,
         )
         ax[1].legend(loc="best")
 
         imp = df["imp"].values
-        _ = ax[2].hist(imp, density=True, bins=nbins)
-        ax[2].set_xlabel("Impact parameter", labelpad=25, fontsize=font_size * 1.5)
+        _ = self.plot_kde(imp, ax=ax[2], color="C0")
+        ax[2].set_xlabel("Impact parameter", fontsize=font_size * 1.5)
         ax[2].set_title(
-            f"{self.date4plot}, {self.inst}",
-            loc="right",
-            fontsize=font_size * 1.5,
+            f"{self.date4plot}, {self.inst}", loc="right", fontsize=font_size * 1.5
         )
         if save:
             outfile = f"{self.outdir}/{self.outfile_prefix}_posteriors"
             outfile += suffix if self.mask_start is None else f"_mask{suffix}"
             savefig(fig, outfile, dpi=300, writepdf=False)
         return fig
+
+    def plot_kde(self, vals, ax=None, color="C0", label="", fill=True):
+        if ax is None:
+            _, ax = plt.subplots()
+        kde = stats.gaussian_kde(vals)
+        xmodel = np.linspace(min(vals), max(vals), 200)
+        ax.plot(xmodel, kde(xmodel), lw=3, color=color, zorder=5, label=label)
+        if fill:
+            ax.fill_between(xmodel, 0, kde(xmodel), color=color, alpha=0.5)
+        return max(kde(xmodel))
 
     def plot_final_fit(
         self,
@@ -1276,6 +1277,44 @@ class LPF:
             outfile = f"{self.outdir}/{self.outfile_prefix}_transit_fit"
             outfile += suffix if self.mask_start is None else f"_mask{suffix}"
             savefig(fig, outfile, dpi=300, writepdf=False)
+        return fig
+
+    def plot_radii(
+        self, rstar, rstar_err, fill=False, unit=u.Rjup, figsize=(5, 5), alpha=0.5
+    ):
+        fig, ax = plt.subplots(figsize=figsize)
+        df = self.get_mcmc_samples()
+        rstar_samples = np.random.normal(rstar, rstar_err, size=len(df))
+        if self.model == "chromatic":
+            cols = [f"k_{b}" for b in self.bands]
+            d = df[cols].apply(lambda x: x * rstar_samples * u.Rsun.to(unit))
+            d.columns = self.bands
+            for column, color in colors.items():
+                _ = self.plot_kde(
+                    d[column].values,
+                    ax=ax,
+                    color=color,
+                    label=column,
+                    alpha=alpha,
+                    fill=fill,
+                )
+        else:
+            d = df["k"] * rstar_samples * u.Rsun.to(unit)
+            d.name = "achromatic Rp"
+            _ = self.plot_kde(
+                d.values, ax=ax, color=color, label=column, alpha=alpha, fill=fill
+            )
+
+        ax.set_xlabel(f"Companion radius ({unit._format['latex']})")
+        ax.set_title(
+            f"(assuming Rs={rstar:.2f}+/-{rstar_err:.2f}" + r" $R_{\odot}$)"
+        )
+        Rp_tfop = self.planet_params["rprs"][0] * rstar * u.Rsun.to(unit)
+        ax.axvline(
+            Rp_tfop, 0, 1, c="k", ls="--", lw=2, label=f"Rp={Rp_tfop:.1f}\n(TFOP)"
+        )
+        ax.set_ylabel("Density")
+        ax.legend()
         return fig
 
     def plot_ing_egr(self, ax, ymin=0.9, ymax=1.0, color="C0"):
@@ -2128,9 +2167,7 @@ def plot_ql(
         color=mcolor,
         label=f"{binsize_mins}-min bin",
     )
-
-    factor = binsize / exptime
-    rms = np.std(np.diff(df.loc[idx, p])) * 1e3 / np.sqrt(factor)
+    rms = np.std(np.diff(f2)) * 1e3
     text = f"rms={rms:.2f} ppt/{binsize_mins:.1f} min"
 
     ax.set_title(text)
