@@ -16,7 +16,7 @@ User-friedly features include:
 
 Note:
 * To re-define the priors, manually edit
-  `get_chi2_chromatic_transit` method within `LPF` class
+  `get_chi2_transit` method within `LPF` class
 
 TODO
 * use other optimizers e.g. PSO
@@ -100,8 +100,9 @@ colors = {
 @dataclass
 class LPF:
     name: str
-    ticid: str
     date: str
+    toi_name: str
+    ticid: str
     data: Dict = field(repr=False)
     star_params: Dict[str, Tuple[float, float]] = field(repr=False)
     planet_params: Dict[str, Tuple[float, float]] = field(repr=False)
@@ -387,7 +388,7 @@ class LPF:
         d = np.array(pv[self.d_idx : self.d_idx + self.nband])
         return tc, a_Rs, imp, k, d
 
-    def get_chi2_chromatic_transit(self, pv):
+    def get_chi2_transit(self, pv):
         """
         fixed parameters
         ----------------
@@ -489,10 +490,14 @@ class LPF:
             chi2 += ((tdur - self.tdur[0]) / self.tdur[1]) ** 2
         return chi2
 
-    def neg_loglikelihood(self, pv):
-        return -self.get_chi2_chromatic_transit(pv)
+    def neg_likelihood(self, pv):
+        return -self.get_chi2_transit(pv)
 
-    def optimize_chromatic_transit(self, p0, method="Nelder-Mead"):
+    def neg_loglikelihood(self, pv):
+        raise NotImplementedError("unstable")
+        return -np.log(self.get_chi2_transit(pv))
+
+    def optimize_chi2_transit(self, p0, method="Nelder-Mead"):
         """
         Optimize parameters using `scipy.minimize`
         Uses previous optimized parameters if run again
@@ -503,9 +508,7 @@ class LPF:
             assert len(p0) == self.ndim
             pv = p0
 
-        self.opt_result = minimize(
-            self.get_chi2_chromatic_transit, pv, method=method
-        )
+        self.opt_result = minimize(self.get_chi2_transit, pv, method=method)
         if self.opt_result.success:
             print("Optimization successful!")
             print("---------------------")
@@ -535,7 +538,7 @@ class LPF:
         ]
         with Pool(self.ndim) as pool:
             self.sampler = emcee.EnsembleSampler(
-                self.nwalkers, self.ndim, self.neg_loglikelihood, pool=pool
+                self.nwalkers, self.ndim, self.neg_likelihood, pool=pool
             )
             state = self.sampler.run_mcmc(pos, self.nsteps // 2, progress=True)
             # if reset:
@@ -1718,6 +1721,30 @@ class LPF:
             savefig(fig, outfile, dpi=300, writepdf=False)
         return fig
 
+    def report(self):
+        txt = f"TIC {self.ticid}{self.alias} ({self.toi_name}) on UT 20{self.date} "
+        txt += f"{self.inst} in {','.join(self.bands)}\n"
+        txt += f"We observed a full on 20{self.date} UT in {','.join(self.bands)} "
+
+        df = self.get_mcmc_samples()
+        tc = df["tc"].median()
+        tc0 = self.tc
+        tdiff = tc - tc0[0] - self.time_offset
+        tdiff_mins = abs(tdiff) * 60 * 24
+        timing = "late" if tdiff > 0 else "early"
+        tsigma = tdiff / tc0[1]
+
+        depths = []
+        for b in self.bands:
+            m = df["k_" + b].median()
+            depth = 1e3 * m**2
+            # print(f'Rp/Rs({b})^2 = {depth:.2f} ppt')
+            depths.append(round(depth, 1))
+        # print(depths)
+        txt += f"and detected a {tdiff_mins:.1f}-min {timing} ({abs(tsigma):.1f} sigma), [Rp/Rs]^2: "
+        txt += f"{','.join(list(map(str, depths)))} ppt event using XXX\" (un)contaminated aperture."
+        return txt
+
 
 @dataclass
 class Star:
@@ -1758,6 +1785,10 @@ class Star:
         self.ra = float(self.data_json["coordinates"].get("ra"))
         self.dec = float(self.data_json["coordinates"].get("dec"))
         self.ticid = self.data_json["basic_info"].get("tic_id")
+        self.toi_name = self.data_json["tois"][0].get("toi")
+        self.notes = self.data_json["tois"][0].get("notes")
+        if self.notes is not None:
+            print(f"TFOP notes: {self.notes}")
 
         idx = 1
         for i, p in enumerate(self.data_json["stellar_parameters"]):
