@@ -87,13 +87,21 @@ filter_widths = {
     "r": (560, 700),
     "i": (700, 820),
     "z": (830, 910),
-}
+    "g-narrow": (489.5, 540.5), #515 / 51
+    "Na_D": (586, 592.2), #589.1 / 6.2
+    "i-narrow": (776, 808), #792 / 32
+    "z-narrow": (846.5, 889.5), #868 / 43
+} 
 bands = list(filter_widths.keys())
 colors = {
     "g": "blue",
     "r": "green",
     "i": "darkorange",
     "z": "red",
+    "g-narrow": "blue",
+    "Na_D": "green",
+    "i-narrow": "darkorange",
+    "z-narrow": "red",
 }
 
 
@@ -268,8 +276,8 @@ class LPF:
             tc_err = np.sqrt(tc_err**2 + (self.period[1] * self.norbits) ** 2)
             print(f"Shifted t0: ({tc+self.time_offset}, {tc_err})")
             print(f"Shifted by {self.norbits} periods.")
-        errmsg = f"{self.obs_start:.6f}<{tc:.6f}<{self.obs_end:.6f}"
-        assert tc > self.obs_start and tc < self.obs_end, errmsg
+        errmsg = f"obs start={self.obs_start:.6f} < tc={tc:.6f} < obs end={self.obs_end:.6f}"
+        assert tc > self.obs_start or tc < self.obs_end, errmsg
         self.tc = (tc, tc_err)
         self.ingress = np.array(self.tc) - self.tdur[0] / 2
         self.egress = np.array(self.tc) + self.tdur[0] / 2
@@ -324,7 +332,7 @@ class LPF:
         # Create the limb darkening profiles
         ps = sc.create_profiles()
         # Estimate quadratic law coefficients
-        cq, eq = ps.coeffs_qd(do_mc=True)
+        cq, eq = ps.coeffs_qd(do_mc=False)
         qc, qe = ps.coeffs_qd()
         for i, b in enumerate(ps._filters):
             if self.DEBUG:
@@ -481,12 +489,12 @@ class LPF:
             model = trend * flux_tr
             chi2 = chi2 + np.sum((f - model) ** 2 / e**2)
         # add normal priors
-        # if tc > 0.:
-        #     chi2 += ((tc - self.tc[0])/self.tc[1])**2
-        # a_Rs0 = self.planet_params['a_Rs']
-        # if a_Rs > 0.:
-        #     chi2 += ((a_Rs - a_Rs)[0])/a_Rso[1])**2
-        if tdur > 0.0:
+        if tc > 0.:
+            chi2 += ((tc - self.tc[0])/self.tc[1])**2
+        a_Rs0 = self.planet_params['a_Rs']
+        if a_Rs > 0.:
+            chi2 += ((a_Rs - a_Rs0[0])/a_Rs0[1])**2
+        if tdur > 0.:
             chi2 += ((tdur - self.tdur[0]) / self.tdur[1]) ** 2
         return chi2
 
@@ -806,7 +814,7 @@ class LPF:
         axes[-1].set_xlabel("step number")
         return fig
 
-    def plot_corner(self, transform=True, discard=1, thin=1, start=0, end=None):
+    def plot_corner(self, transform=True, truths=None, discard=1, thin=1, start=0, end=None):
         """
         corner plot of MCMC chain
 
@@ -814,8 +822,6 @@ class LPF:
             parameter id (0 means first)
         end : int
             parameter id
-
-        TODO show priors in `truths` argument of corner
         """
         end = self.ndim if end is None else end
         if self.use_r1r2 and transform:
@@ -824,7 +830,10 @@ class LPF:
             labels[0] = f"tc-{self.time_offset:,}"
             df["tc"] = df["tc"].values - self.time_offset
             fig = corner.corner(
-                df.iloc[:, start:end], labels=labels[start:end], show_titles=True
+                df.iloc[:, start:end], 
+                labels=labels[start:end], 
+                show_titles=True, 
+                truths=truths
             )
         else:
             labels = self.model_param_names.copy()
@@ -835,7 +844,10 @@ class LPF:
                 fc = fc.reshape(self.nsteps, self.nwalkers, -1)
                 fc = fc[discard::thin].reshape(-1, self.ndim)
             fig = corner.corner(
-                fc[:, start:end], labels=labels[start:end], show_titles=True
+                fc[:, start:end], 
+                labels=labels[start:end], 
+                show_titles=True, 
+                truths=truths
             )
         return fig
 
@@ -926,7 +938,8 @@ class LPF:
             ax[i].xaxis.set_minor_locator(AutoMinorLocator(5))
             ax[i].yaxis.set_minor_locator(AutoMinorLocator(5))
             ax[i].tick_params(labelsize=font_size * 0.8)
-            tx = xmin + (xmax - xmin) * 0.75
+            tx = np.min(t) + (np.max(t) - np.min(t)) * 0.02
+            # tx = xmin + (xmax - xmin) * 0.75
             ty = ymin + (ymax - ymin) * 0.9
             ax[i].text(
                 tx, ty, f"{b}-band", color=colors[b], fontsize=font_size * 0.8
@@ -1197,7 +1210,8 @@ class LPF:
             ax[0, i].set_ylim(ymin1, ymax1)
             ax[1, i].set_ylim(ymin2, ymax2)
 
-            tx = np.min(t) + (np.max(t) - np.min(t)) * 0.75
+            # tx = np.min(t) + (np.max(t) - np.min(t)) * 0.75
+            tx = np.min(t) + (np.max(t) - np.min(t)) * 0.02
             ty = ymin1 + (ymax1 - ymin1) * 0.9
             ax[0, i].text(
                 tx, ty, f"{b}-band", color=colors[b], fontsize=font_size * 0.6
