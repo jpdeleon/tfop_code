@@ -128,7 +128,7 @@ class LPF:
     DEBUG: bool = field(repr=False, default=False)
 
     def __post_init__(self):
-        # super().__post_init__()
+        self.date = str(self.date)
         self._validate_inputs()
         self._init_data()
         self._init_params()
@@ -264,14 +264,16 @@ class LPF:
         tc, tc_err = tc0[0] - self.time_offset, tc0[1]
 
         # obs_mid = self.obs_end - self.obs_start
-        b = self.bands[0]
-        int_tc = int(self.times[b][0])
-        if abs(tc - int_tc) > 1:
+        tc0 = self.planet_params["t0"]
+        tc, tc_err = tc0[0] - self.time_offset, tc0[1]
+        tmed = np.median(np.concatenate([self.times[b] for b in self.data]))
+        if abs(tc - tmed) > self.period[0]:
             print(f"Input t0: {tc0}")
-            # self.norbits = np.floor((int_tc-tc)/self.period[0])
-            self.norbits = int(
-                (np.median(self.times[b]) - tc + 0.3) / self.period[0]
-            )
+            norbit = round((tmed - tc) / self.period[0])
+            norbits = np.array([norbit-1,norbit,norbit+1])
+            diffs = abs((tc+self.period[0]*norbits)-tmed)
+            i = np.argmin(diffs)
+            self.norbits = norbits[i]
             tc = tc + self.period[0] * self.norbits
             tc_err = np.sqrt(tc_err**2 + (self.period[1] * self.norbits) ** 2)
             print(f"Shifted t0: ({tc+self.time_offset}, {tc_err})")
@@ -346,6 +348,7 @@ class LPF:
 
         chi2 of linear baseline model
         """
+        assert len(p0)==self.nband
         int_t0 = self.obs_start
         chi2 = 0.0
         for i, b in enumerate(self.bands):
@@ -379,6 +382,7 @@ class LPF:
         self.bic_lin = res_lin.fun + npar_lin * np.log(self.ndata)
         # print('BIC(linear) = ', self.bic_lin)
         self.lin_model_offsets = {b: res_lin.x[i] for i, b in enumerate(self.bands)}
+        return res_lin.x
 
     def unpack_parameters(self, pv):
         """
@@ -526,6 +530,7 @@ class LPF:
             self.optimum_params = self.opt_result.x
         else:
             print("Caution: Optimization **NOT** successful!")
+        return self.opt_result.x
 
     def sample_mcmc(self, pv=None, nsteps=1_000, nwalkers=None):
         """
@@ -555,7 +560,7 @@ class LPF:
 
         # Extract and analyze the results
         self.analyze_mcmc_results()
-
+        
     def analyze_mcmc_results(self):
         log_prob = self.sampler.get_log_prob()
         argmax = np.argmax(log_prob)
@@ -565,15 +570,27 @@ class LPF:
         i = argmax - self.nwalkers * j
         self.chi2_best = -log_prob[j, i]
         # print(chi2_best)
-        npar_tr = len(self.best_fit_params)  # +4
+        npar_tr = len(self.best_fit_params)
         # print('ndata = ', self.ndata)
         # print('npar(transit+linear) = ', npar_tr)
-        self.bic = self.chi2_best + npar_tr * np.log(self.ndata)
+        self.bic_transit = self.chi2_best + npar_tr * np.log(self.ndata)
         # print('BIC(transit+linear) = ', bic_tr)
         if not hasattr(self, "bic_lin"):
-            self.optimize_chi2_linear_baseline()
-        self.bic_delta = self.bic_lin - self.bic
+            _ = self.optimize_chi2_linear_baseline()
+        self.bic_delta = self.bic_lin - self.bic_transit
         # print('delta_BIC = ', delta_bic)
+
+    def get_delta_bic(self):
+        p0 = self.optimize_chi2_linear_baseline()
+        ll_no_transit = self.get_chi2_linear_baseline(p0)
+        pv = self.best_fit_params
+        ll_with_transit = self.get_chi2_transit(pv)
+        ndim = len(self.best_fit_params)
+
+        def delta_bic(ll1, ll2, d1, d2, n):
+            return ll2 - ll1 + 0.5 * (d1 - d2) * np.log(n)
+        
+        return delta_bic(ll_no_transit, ll_with_transit, 4, ndim, self.ndata)
 
     def get_mcmc_samples(self, discard=1, thin=1):
         """
@@ -887,7 +904,7 @@ class LPF:
             sharex="col",
             tight_layout=True,
         )
-        ax = axs.flatten()
+        ax = axs.flatten() if nrows>1 else axs
         depth = self.planet_params["rprs"][0] ** 2
         # unpack fixed parameters
         # per = self.period[0]
@@ -1085,216 +1102,220 @@ class LPF:
         return max(kde(xmodel))
 
     def plot_final_fit(
-        self,
-        discard: int = 1,
-        thin: int = 1,
-        nsamples: int = 100,
-        ylims_top: tuple = (0.9, 1.02),
-        ylims_bottom: tuple = (0.9, 1.02),
-        msize: int = 5,
-        font_size: int = 25,
-        title: str = None,
-        figsize: tuple = (16, 12),
-        binsize: float = 600 / 86400,
-        save: bool = False,
-        suffix: str = ".pdf",
-    ):
-        ymin1, ymax1 = ylims_top
-        ymin2, ymax2 = ylims_bottom
+            self,
+            discard: int = 1,
+            thin: int = 1,
+            nsamples: int = 100,
+            ylims_top: tuple = (0.9, 1.02),
+            ylims_bottom: tuple = (0.9, 1.02),
+            msize: int = 5,
+            font_size: int = 25,
+            title: str = None,
+            figsize: tuple = (16, 12),
+            binsize: float = 600 / 86400,
+            save: bool = False,
+            suffix: str = ".pdf",
+        ):
+            ymin1, ymax1 = ylims_top
+            ymin2, ymax2 = ylims_bottom
 
-        fig, ax = plt.subplots(
-            2, self.nband, figsize=figsize, sharey="row", sharex="col"
-        )
-        plt.subplots_adjust(hspace=0.1, wspace=0)
-
-        # unpack fixed parameters
-        per = self.period[0]
-        # unpack free parameters
-        if not hasattr(self, "best_fit_params"):
-            raise ValueError("Run `sample_mcmc()` first.")
-
-        pv = self.best_fit_params
-        if self.use_r1r2:
-            tc_best, a_Rs_best, r1, r2, d_best = self.unpack_parameters(pv)
-            imp_best, k_best = r1r2_to_imp_k(
-                r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
+            fig, axs = plt.subplots(
+                2, self.nband, figsize=figsize, sharey="row", sharex="col"
             )
-        else:
-            tc_best, a_Rs_best, imp_best, k_best, d_best = self.unpack_parameters(pv)
+            plt.subplots_adjust(hspace=0.1, wspace=0)
 
-        # derived
-        inc_best = np.arccos(imp_best / a_Rs_best)
+            # unpack fixed parameters
+            per = self.period[0]
+            # unpack free parameters
+            if not hasattr(self, "best_fit_params"):
+                raise ValueError("Run `sample_mcmc()` first.")
 
-        trends_best = self.get_trend_models(self.best_fit_params)
-        transits_best = self.get_upsampled_transit_models(self.best_fit_params)
+            pv = self.best_fit_params
+            if self.use_r1r2:
+                tc_best, a_Rs_best, r1, r2, d_best = self.unpack_parameters(pv)
+                imp_best, k_best = r1r2_to_imp_k(
+                    r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
+                )
+            else:
+                tc_best, a_Rs_best, imp_best, k_best, d_best = self.unpack_parameters(pv)
 
-        # fc = self.sampler.get_chain(flat=True, discard=discard, thin=thin)
-        fc = self.sampler.flatchain.copy()
-        if discard > 1:
-            fc = fc.reshape(self.nsteps, self.nwalkers, -1)
-            fc = fc[discard::thin].reshape(-1, self.ndim)
-        for i, b in enumerate(self.bands):
-            t = self.times[b]
-            f = self.fluxes[b]
-            e = self.flux_errs[b]
-            z = self.covariates[b]
-            t0 = np.min(t)
+            # derived
+            inc_best = np.arccos(imp_best / a_Rs_best)
 
-            # raw and binned data
-            tbin, ybin, yebin = binning_equal_interval(t, f, e, binsize, t0)
-            ax[0, i].plot(t, f, ".k", alpha=0.1)
-            ax[0, i].errorbar(tbin, ybin, yerr=yebin, fmt="ok", markersize=msize)
+            trends_best = self.get_trend_models(self.best_fit_params)
+            transits_best = self.get_upsampled_transit_models(self.best_fit_params)
 
-            # plot each random mcmc samples
-            rand = np.random.randint(len(fc), size=nsamples)
-            for j in range(len(rand)):
-                idx = rand[j]
-                # unpack free parameters
-                if self.use_r1r2:
-                    tc, a_Rs, r1 = fc[idx, : self.k_idx]
-                    if self.model == "chromatic":
-                        r2 = fc[idx, self.k_idx : self.d_idx]
-                    elif self.model == "achromatic":
-                        r2 = np.zeros(self.nband) + fc[idx, self.k_idx]
-                    imp, k = r1r2_to_imp_k(
-                        r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
+            # fc = self.sampler.get_chain(flat=True, discard=discard, thin=thin)
+            fc = self.sampler.flatchain.copy()
+            if discard > 1:
+                fc = fc.reshape(self.nsteps, self.nwalkers, -1)
+                fc = fc[discard::thin].reshape(-1, self.ndim)
+
+            for i, b in enumerate(self.bands):
+                ax1 = axs[0, i] if self.nband>1 else axs[0] 
+                ax2 = axs[1, i] if self.nband>1 else axs[1]
+
+                t = self.times[b]
+                f = self.fluxes[b]
+                e = self.flux_errs[b]
+                z = self.covariates[b]
+                t0 = np.min(t)
+
+                # raw and binned data
+                tbin, ybin, yebin = binning_equal_interval(t, f, e, binsize, t0)
+                ax1.plot(t, f, ".k", alpha=0.1)
+                ax1.errorbar(tbin, ybin, yerr=yebin, fmt="ok", markersize=msize)
+
+                # plot each random mcmc samples
+                rand = np.random.randint(len(fc), size=nsamples)
+                for j in range(len(rand)):
+                    idx = rand[j]
+                    # unpack free parameters
+                    if self.use_r1r2:
+                        tc, a_Rs, r1 = fc[idx, : self.k_idx]
+                        if self.model == "chromatic":
+                            r2 = fc[idx, self.k_idx : self.d_idx]
+                        elif self.model == "achromatic":
+                            r2 = np.zeros(self.nband) + fc[idx, self.k_idx]
+                        imp, k = r1r2_to_imp_k(
+                            r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
+                        )
+                    else:
+                        tc, a_Rs, imp = fc[idx, : self.k_idx]
+                        if self.model == "chromatic":
+                            k = fc[idx, self.k_idx : self.d_idx]
+                        elif self.model == "achromatic":
+                            k = np.zeros(self.nband) + fc[idx, self.k_idx]
+                    d = fc[idx, self.d_idx : self.d_idx + self.nband]
+                    # derived parameters
+                    inc = np.arccos(imp / a_Rs)
+                    # transit
+                    flux_tr = self.transit_models[b].evaluate_ps(
+                        k[i], self.ldc[b], tc, per, a_Rs, inc, e=0, w=0
                     )
-                else:
-                    tc, a_Rs, imp = fc[idx, : self.k_idx]
-                    if self.model == "chromatic":
-                        k = fc[idx, self.k_idx : self.d_idx]
-                    elif self.model == "achromatic":
-                        k = np.zeros(self.nband) + fc[idx, self.k_idx]
-                d = fc[idx, self.d_idx : self.d_idx + self.nband]
-                # derived parameters
-                inc = np.arccos(imp / a_Rs)
-                # transit
+                    flux_tr_time = d[i] * (t - tc) * flux_tr
+                    c = np.polyfit(z, (f - flux_tr_time) / flux_tr, self.lm_order)
+                    # transit with trend
+                    ax1.plot(
+                        t,
+                        flux_tr * (np.polyval(c, z) + d[i] * (t - tc)),
+                        alpha=0.05,
+                        color=colors[b],
+                    )
+
+                # best-fit transit model
                 flux_tr = self.transit_models[b].evaluate_ps(
-                    k[i], self.ldc[b], tc, per, a_Rs, inc, e=0, w=0
-                )
-                flux_tr_time = d[i] * (t - tc) * flux_tr
-                c = np.polyfit(z, (f - flux_tr_time) / flux_tr, self.lm_order)
-                # transit with trend
-                ax[0, i].plot(
-                    t,
-                    flux_tr * (np.polyval(c, z) + d[i] * (t - tc)),
-                    alpha=0.05,
-                    color=colors[b],
+                    k_best[i],
+                    self.ldc[b],
+                    tc_best,
+                    per,
+                    a_Rs_best,
+                    inc_best,
+                    e=0,
+                    w=0,
                 )
 
-            # best-fit transit model
-            flux_tr = self.transit_models[b].evaluate_ps(
-                k_best[i],
-                self.ldc[b],
-                tc_best,
-                per,
-                a_Rs_best,
-                inc_best,
-                e=0,
-                w=0,
-            )
-
-            tbin, ybin, yebin = binning_equal_interval(
-                t, f / trends_best[b], e, binsize, t0
-            )
-            # detrended flux
-            ax[1, i].plot(t, f / trends_best[b], ".k", alpha=0.1)
-            ax[1, i].errorbar(tbin, ybin, yerr=yebin, fmt="ok", markersize=msize)
-            # super sampled best-fit transit model
-            xmodel, ymodel = transits_best[b]
-            ax[1, i].plot(xmodel, ymodel, color=colors[b], linewidth=3)
-            ax[0, i].yaxis.set_minor_locator(AutoMinorLocator(5))
-            ax[1, i].yaxis.set_minor_locator(AutoMinorLocator(5))
-            ax[0, i].xaxis.set_minor_locator(AutoMinorLocator(5))
-            ax[1, i].xaxis.set_minor_locator(AutoMinorLocator(5))
-            ax[0, i].set_ylim(ymin1, ymax1)
-            ax[1, i].set_ylim(ymin2, ymax2)
-
-            # tx = np.min(t) + (np.max(t) - np.min(t)) * 0.75
-            tx = np.min(t) + (np.max(t) - np.min(t)) * 0.02
-            ty = ymin1 + (ymax1 - ymin1) * 0.9
-            ax[0, i].text(
-                tx, ty, f"{b}-band", color=colors[b], fontsize=font_size * 0.6
-            )
-            tx = np.min(t) + (np.max(t) - np.min(t)) * 0.02
-            ty = ymin2 + (ymax2 - ymin2) * 0.8
-            ax[1, i].text(tx, ty, "Detrended", fontsize=font_size * 0.6)
-
-            rms = np.std(
-                f - flux_tr * (np.polyval(c, z) + d_best[i] * (t - tc_best))
-            )
-            rms_text = f"rms = {rms:.4f}"
-            ty = ymin2 + (ymax2 - ymin2) * 0.1
-            ax[1, i].text(tx, ty, rms_text, fontsize=font_size * 0.6)
-            depth = self.planet_params["rprs"][0] ** 2
-            ax[1, i].axhline(
-                1 - depth,
-                color="blue",
-                linestyle="dashed",
-                label="TESS",
-                alpha=0.5,
-            )
-            _ = self.plot_ing_egr(ax=ax[1, i], ymin=0.9, ymax=1.0, color="C0")
-            if i == 0:
-                ax[0, i].set_ylabel("Flux ratio", fontsize=font_size)
-                ax[1, i].set_ylabel("Flux ratio", fontsize=font_size)
-                ax[0, i].tick_params(labelsize=16)
-                ax[1, i].tick_params(labelsize=16)
-                target_name = (
-                    f"{self.name}{self.alias} (TIC{self.ticid}{self.alias})"
-                    if title is None
-                    else title
+                tbin, ybin, yebin = binning_equal_interval(
+                    t, f / trends_best[b], e, binsize, t0
                 )
-                ax[0, i].text(
-                    0.0,
-                    1.14,
-                    target_name,
-                    horizontalalignment="left",
-                    verticalalignment="center",
-                    transform=ax[0, i].transAxes,
+                # detrended flux
+                ax2.plot(t, f / trends_best[b], ".k", alpha=0.1)
+                ax2.errorbar(tbin, ybin, yerr=yebin, fmt="ok", markersize=msize)
+                # super sampled best-fit transit model
+                xmodel, ymodel = transits_best[b]
+                ax2.plot(xmodel, ymodel, color=colors[b], linewidth=3)
+                ax1.yaxis.set_minor_locator(AutoMinorLocator(5))
+                ax2.yaxis.set_minor_locator(AutoMinorLocator(5))
+                ax1.xaxis.set_minor_locator(AutoMinorLocator(5))
+                ax2.xaxis.set_minor_locator(AutoMinorLocator(5))
+                ax1.set_ylim(ymin1, ymax1)
+                ax2.set_ylim(ymin2, ymax2)
+
+                # tx = np.min(t) + (np.max(t) - np.min(t)) * 0.75
+                tx = np.min(t) + (np.max(t) - np.min(t)) * 0.02
+                ty = ymin1 + (ymax1 - ymin1) * 0.9
+                ax1.text(
+                    tx, ty, f"{b}-band", color=colors[b], fontsize=font_size * 0.6
+                )
+                tx = np.min(t) + (np.max(t) - np.min(t)) * 0.02
+                ty = ymin2 + (ymax2 - ymin2) * 0.8
+                ax2.text(tx, ty, "Detrended", fontsize=font_size * 0.6)
+
+                rms = np.std(
+                    f - flux_tr * (np.polyval(c, z) + d_best[i] * (t - tc_best))
+                )
+                rms_text = f"rms = {rms:.4f}"
+                ty = ymin2 + (ymax2 - ymin2) * 0.1
+                ax2.text(tx, ty, rms_text, fontsize=font_size * 0.6)
+                depth = self.planet_params["rprs"][0] ** 2
+                ax2.axhline(
+                    1 - depth,
+                    color="blue",
+                    linestyle="dashed",
+                    label="TESS",
+                    alpha=0.5,
+                )
+                _ = self.plot_ing_egr(ax=ax2, ymin=0.9, ymax=1.0, color="C0")
+                if i == 0:
+                    ax1.set_ylabel("Flux ratio", fontsize=font_size)
+                    ax2.set_ylabel("Flux ratio", fontsize=font_size)
+                    ax1.tick_params(labelsize=16)
+                    ax2.tick_params(labelsize=16)
+                    target_name = (
+                        f"{self.name}{self.alias} (TIC{self.ticid}{self.alias})"
+                        if title is None
+                        else title
+                    )
+                    ax1.text(
+                        0.0,
+                        1.14,
+                        target_name,
+                        horizontalalignment="left",
+                        verticalalignment="center",
+                        transform=ax1.transAxes,
+                        fontsize=font_size,
+                    )
+                    text = f"{self.model.title()} transit fit,  "
+                    text += f"$\Delta$BIC (non-transit - transit) = {self.bic_delta:.1f}"
+                    ax1.text(
+                        0.0,
+                        1.05,
+                        text,
+                        horizontalalignment="left",
+                        verticalalignment="center",
+                        transform=ax1.transAxes,
+                        fontsize=font_size * 0.6,
+                    )
+                if (i > 0) and (i == self.nband - 1):
+                    ax1.set_title(
+                        f"{self.date4plot}, {self.inst}",
+                        loc="right",
+                        fontsize=font_size * 0.8,
+                    )
+                if i > 0:
+                    ax1.tick_params(
+                        labelleft=False,
+                        labelright=False,
+                        labeltop=False,
+                        labelsize=16,
+                    )
+                    ax2.tick_params(
+                        labelleft=False,
+                        labelright=False,
+                        labeltop=False,
+                        labelsize=16,
+                    )
+                ax2.set_xlabel(
+                    f"BJD - {self.time_offset:.0f}",
+                    labelpad=30,
                     fontsize=font_size,
                 )
-                text = f"{self.model.title()} transit fit,  "
-                text += f"$\Delta$BIC (non-transit - transit) = {self.bic_delta:.1f}"
-                ax[0, i].text(
-                    0.0,
-                    1.05,
-                    text,
-                    horizontalalignment="left",
-                    verticalalignment="center",
-                    transform=ax[0, i].transAxes,
-                    fontsize=font_size * 0.6,
-                )
-            if (i > 0) and (i == self.nband - 1):
-                ax[0, i].set_title(
-                    f"{self.date4plot}, {self.inst}",
-                    loc="right",
-                    fontsize=font_size * 0.8,
-                )
-            if i > 0:
-                ax[0, i].tick_params(
-                    labelleft=False,
-                    labelright=False,
-                    labeltop=False,
-                    labelsize=16,
-                )
-                ax[1, i].tick_params(
-                    labelleft=False,
-                    labelright=False,
-                    labeltop=False,
-                    labelsize=16,
-                )
-            ax[1, i].set_xlabel(
-                f"BJD - {self.time_offset:.0f}",
-                labelpad=30,
-                fontsize=font_size,
-            )
-        ax[1, i].legend(loc="lower right", fontsize=12)
-        if save:
-            outfile = f"{self.outdir}/{self.outfile_prefix}_transit_fit"
-            outfile += suffix if self.mask_start is None else f"_mask{suffix}"
-            savefig(fig, outfile, dpi=300, writepdf=False)
-        return fig
+            ax2.legend(loc="lower right", fontsize=12)
+            if save:
+                outfile = f"{self.outdir}/{self.outfile_prefix}_transit_fit"
+                outfile += suffix if self.mask_start is None else f"_mask{suffix}"
+                savefig(fig, outfile, dpi=300, writepdf=False)
+            return fig
 
     def plot_radii(
         self, rstar, rstar_err, fill=False, unit=u.Rjup, figsize=(5, 5), alpha=0.5
