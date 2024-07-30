@@ -334,10 +334,12 @@ class LPF:
                 params.update({"k": self.planet_params["rprs"]})
         self.d_idx = len(params)
         params.update({"d_" + b: (self.lin_model_offsets[b], 0) for b in self.bands})
-        self.model_param_names = list(params.keys())
-        self.ndim = len(params)
         self.model_params = params
-        return params if return_dict else [v[0] for k, v in params.items()]
+        vals = [v[0] for k, v in params.items()]
+        self.model_params_names = list(params.keys())
+        self.model_params_vals = vals
+        self.ndim = len(params)
+        return params if return_dict else vals
 
     def _init_ldc(self):
         """initialize quadratic limb-darkening coefficients"""
@@ -543,7 +545,7 @@ class LPF:
             print("Optimization successful!")
             print("---------------------")
             print("Optimized parameters:")
-            for n, i in zip(self.model_param_names, self.opt_result.x):
+            for n, i in zip(self.model_params_names, self.opt_result.x):
                 print(f"{n}: {i:.2f}")
             self.optimum_params = self.opt_result.x
         else:
@@ -562,7 +564,14 @@ class LPF:
         # if hasattr(self, 'sampler'):
         #     params = self.sampler
         self.nsteps = nsteps
-        params = self.optimum_params if pv is None else pv
+        if pv:
+            params = pv
+        else:
+            if hasattr(self, 'optimum_params'):
+                params = self.optimum_params 
+            else:
+                errmsg = "Run `optimize_chi2_transit()` first or provide pv"
+                raise ValueError(errmsg)
         assert len(params) == self.ndim
         pos = [
             params + 1e-5 * np.random.randn(self.ndim) for i in range(self.nwalkers)
@@ -616,12 +625,12 @@ class LPF:
         """
         # FIXME: using get_chain() overwrites the chain somehow!
         # fc = self.sampler.get_chain(flat=True, discard=discard, thin=thin).copy()
-        if hasattr(self, "mcmc_samples"):
+        if self.mcmc_samples is None:
             fc = self.sampler.flatchain.copy()
-            param_names = self.model_param_names.copy()
+            param_names = self.model_params_names.copy()
             fc = fc.reshape(self.nsteps, self.nwalkers, -1)
             fc = fc[discard::thin].reshape(-1, self.ndim)
-            df = pd.DataFrame(fc, columns=self.model_param_names)
+            df = pd.DataFrame(fc, columns=self.model_params_names)
             df["tc"] = df["tc"] + self.time_offset
             if self.use_r1r2:
                 print("Converting r1,r2 --> imp,k")
@@ -844,7 +853,7 @@ class LPF:
             ax = axes[i]
             ax.plot(samples[:, :, start + i], "k", alpha=0.3)
             ax.set_xlim(0, len(samples))
-            ax.set_ylabel(self.model_param_names[i])
+            ax.set_ylabel(self.model_params_names[i])
             ax.yaxis.set_label_coords(-0.1, 0.5)
         axes[-1].set_xlabel("step number")
         return fig
@@ -871,7 +880,7 @@ class LPF:
                 truths=truths
             )
         else:
-            labels = self.model_param_names.copy()
+            labels = self.model_params_names.copy()
             labels[0] = f"tc-{self.time_offset:,}"
             # fc = self.sampler.get_chain(flat=True, discard=discard, thin=thin)
             fc = self.sampler.flatchain.copy()
@@ -1345,20 +1354,21 @@ class LPF:
             cols = [f"k_{b}" for b in self.bands]
             d = df[cols].apply(lambda x: x * rstar_samples * u.Rsun.to(unit))
             d.columns = self.bands
-            for column, color in colors.items():
+            for b in self.bands:
                 _ = self.plot_kde(
-                    d[column].values,
+                    d[b].values,
                     ax=ax,
-                    color=color,
-                    label=column,
+                    color=colors[b],
+                    label=b,
                     alpha=alpha,
                     fill=fill,
                 )
         else:
             d = df["k"] * rstar_samples * u.Rsun.to(unit)
             d.name = "achromatic Rp"
+            b = self.bands[0]
             _ = self.plot_kde(
-                d.values, ax=ax, color=color, label=column, alpha=alpha, fill=fill
+                d.values, ax=ax, color=colors[b], alpha=alpha, fill=fill
             )
 
         ax.set_xlabel(f"Companion radius ({unit._format['latex']})")
@@ -1369,7 +1379,7 @@ class LPF:
         ax.axvline(
             Rp_tfop, 0, 1, c="k", ls="--", lw=2, label=f"Rp={Rp_tfop:.1f}\n(TFOP)"
         )
-        ax.set_ylabel("Density")
+        ax.set_ylabel("Probability")
         ax.legend()
         return fig
 
@@ -1785,13 +1795,23 @@ class LPF:
             savefig(fig, outfile, dpi=300, writepdf=False)
         return fig
 
-    def report(self):
-        txt = f"TIC {self.ticid}{self.alias} ({self.toi_name}) on UT 20{self.date} "
-        txt += f"{self.inst} in {','.join(self.bands)}\n"
-        txt += f"We observed a full on 20{self.date} UT in {','.join(self.bands)} "
+    def get_report(self):
+        inst = self.inst.lower()
+        txt = f"Title: TIC {self.ticid}{self.alias} ({self.toi_name}) on UT 20{self.date} "
+        if inst=='sinistro':
+            txt += "from LCO-1m-"
+        elif inst=='muscat2':
+            txt += "from TCS-1.52m-"
+        elif inst=='muscat3':
+            txt += "from FTN-2m-"
+        elif inst=='muscat4':
+            txt += "from FTS-2m-"
+        txt += f"{self.inst} in {','.join(self.bands)}\n\n"
+        txt += f"We observed a full/ingress/egress on 20{self.date} UT in {','.join(self.bands)} "
 
         df = self.get_mcmc_samples()
         tc = df["tc"].median()
+        tc_sig = df["tc"].std()
         tc0 = self.tc
         tdiff = tc - tc0[0] - self.time_offset
         tdiff_mins = abs(tdiff) * 60 * 24
@@ -1806,7 +1826,15 @@ class LPF:
             depths.append(round(depth, 1))
         # print(depths)
         txt += f"and detected a {tdiff_mins:.1f}-min {timing} ({abs(tsigma):.1f} sigma), [Rp/Rs]^2: "
-        txt += f"{','.join(list(map(str, depths)))} ppt event using XXX\" (un)contaminated aperture."
+        txt += f"{','.join(list(map(str, depths)))} ppt event using XXX\" uncontaminated/contaminated aperture.\n\n"
+        
+        try:
+            txt += "Typical FWHM: NA\n"
+            txt += f"Predicted Tc: {tc0[0]+self.time_offset-2450000:.6f} ± {tc0[1]:.6f} BJD_TDB\n"
+            txt += f"Measured Tc: {tc-2450000:.6f} ± {tc_sig:.6f} BJD_TDB\n"
+            txt += "NEBcheck stars NOT cleared: NA"
+        except Exception as e:
+            print(e)
         return txt
 
 
@@ -2012,7 +2040,7 @@ class Planet(Star):
                         map(
                             float,
                             (
-                                planet_params.get("tdur", 0),
+                                planet_params.get("dur", 0),
                                 planet_params.get("dur_e", 0),
                             ),
                         )
