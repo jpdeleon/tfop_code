@@ -1795,7 +1795,7 @@ class LPF:
             savefig(fig, outfile, dpi=300, writepdf=False)
         return fig
 
-    def get_report(self):
+    def get_report(self, mcmc_samples_fp=None):
         inst = self.inst.lower()
         txt = f"Title: TIC {self.ticid}{self.alias} ({self.toi_name}) on UT 20{self.date} "
         if inst=='sinistro':
@@ -1809,7 +1809,10 @@ class LPF:
         txt += f"{self.inst} in {','.join(self.bands)}\n\n"
         txt += f"We observed a full/ingress/egress on 20{self.date} UT in {','.join(self.bands)} "
 
-        df = self.get_mcmc_samples()
+        if mcmc_samples_fp:
+            df = pd.read_csv(mcmc_samples_fp)
+        else:
+            df = self.get_mcmc_samples()
         tc = df["tc"].median()
         tc_sig = df["tc"].std()
         tc0 = self.tc
