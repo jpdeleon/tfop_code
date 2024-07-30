@@ -78,7 +78,7 @@ plt.rcParams["font.size"] = 26
 os.environ["OMP_NUM_THREADS"] = "1"
 os.nice(19)
 
-PRIOR_K_MIN = 0.01
+PRIOR_K_MIN = 0.0
 PRIOR_K_MAX = 1.0
 
 # bandpasses in increasing wavelength
@@ -102,6 +102,24 @@ colors = {
     "Na_D": "green",
     "i-narrow": "darkorange",
     "z-narrow": "red",
+}
+
+fovs = {
+    'sinistro_full': 13*60, #CONFMODE= 'full_frame'
+    'sinistro_2x2': 26.5*60, #CONFMODE= 'central_2k_2x2'
+    'muscat': 6.1, 
+    'muscat2': 7.4, #7.4 × 7.4
+    'muscat3': 9.1,
+    'muscat4': 9.1
+    
+}
+pixscales = {
+    'sinistro_full': 0.389, #CONFMODE= 'full_frame'
+    'sinistro_2x2': 0.778, #CONFMODE= 'central_2k_2x2'
+    'muscat': 0.358,
+    'muscat2': 0.44,
+    'muscat3': 0.267,
+    'muscat4': 0.267,
 }
 
 
@@ -1401,7 +1419,10 @@ class LPF:
         dec: float,
         ref_fits_file_path: str,
         ref_obj_file_path: str,
-        show_target: bool = False,
+        target_ID : int = None,
+        target_color: str = "red",
+        cIDs: list = None,
+        cIDs_color: str = "blue",
         cmap: str = "gray",
         contrast: float = 0.5,
         text_offset: tuple = (0, 0),
@@ -1411,7 +1432,7 @@ class LPF:
         font_size: float = 20,
         show_scale_bar: bool = True,
         marker_color: str = "yellow",
-        scale_color: str = "w",
+        scale_color: str = "white",
         figsize: tuple = (10, 10),
         show_grid: bool = True,
         save: bool = False,
@@ -1452,11 +1473,11 @@ class LPF:
 
         # target
         rad_marker = phot_aper_pix * pixscale
-        if show_target:
+        if target_ID:
             c = SphericalCircle(
                 (ra * u.deg, dec * u.deg),
                 rad_marker * u.arcsec,
-                edgecolor="red",
+                edgecolor=target_color,
                 facecolor="none",
                 lw=3,
                 zorder=10,
@@ -1467,10 +1488,18 @@ class LPF:
             #         color='red', transform=ax.get_transform('fk5'))
         for i, (r, d) in enumerate(coords):
             j = int(star_ids[i])
+            mcolor = marker_color
+            if cIDs:
+                cIDs = [int(c) for c in cIDs]
+                if j in cIDs:
+                    mcolor = cIDs_color
+            if target_ID:
+                if j==int(target_ID):
+                    mcolor = target_color
             c = SphericalCircle(
                 (r * u.deg, d * u.deg),
                 rad_marker * u.arcsec,
-                edgecolor=marker_color,
+                edgecolor=mcolor,
                 facecolor="none",
                 lw=2,
                 transform=ax.get_transform("fk5"),
@@ -1481,7 +1510,7 @@ class LPF:
                 d + dd,
                 str(j),
                 fontsize=20,
-                color=marker_color,
+                color=mcolor,
                 transform=ax.get_transform("fk5"),
             )
         ax.set_xlim(0, data.shape[1])
@@ -1689,7 +1718,7 @@ class LPF:
         ra, dec = gaia_sources.loc[0, ["ra", "dec"]].values
         xy = wcs.all_world2pix(np.c_[ra, dec], 0)
         xpix, ypix = int(xy[0][0]), int(xy[0][1])
-        rad_arcsec = fov_padding * gaia_sources["distance"].max()
+        rad_arcsec = fov_padding * gaia_sources["distance_arcsec"].max()
         dx = dy = round(rad_arcsec / pixscale)
         dcrop = data[ypix - dy : ypix + dy, xpix - dx : xpix + dx]
         wcscrop = wcs[ypix - dy : ypix + dy, xpix - dx : xpix + dx]
@@ -1905,12 +1934,13 @@ class Star:
                 catalog="Gaia",
                 version=3,
             ).to_pandas()
-            self.gaia_sources["distance"] = self.gaia_sources[
+            self.gaia_sources["distance_arcsec"] = self.gaia_sources[
                 "distance"
             ] * u.arcmin.to(u.arcsec)
         self.gaia_sources = self.gaia_sources[
-            self.gaia_sources["distance"] <= rad_arcsec
+            self.gaia_sources["distance_arcsec"] <= rad_arcsec
         ]
+        #self.gaia_sources["distance_pix"] = self.gaia_sources["distance_arcsec"]/pixscales[self.inst]
         assert len(self.gaia_sources) > 1, "gaia_sources contains single entry"
         return self.gaia_sources
 
