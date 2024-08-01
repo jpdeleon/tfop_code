@@ -78,7 +78,7 @@ plt.rcParams["font.size"] = 26
 os.environ["OMP_NUM_THREADS"] = "1"
 os.nice(19)
 
-PRIOR_K_MIN = 0.0
+PRIOR_K_MIN = 0.001
 PRIOR_K_MAX = 1.0
 
 # bandpasses in increasing wavelength
@@ -162,6 +162,7 @@ class LPF:
 
     def _validate_inputs(self):
         """Make sure inputs are correct"""
+        assert (PRIOR_K_MIN>=0) & (PRIOR_K_MAX<=1)
         assert isinstance(self.data, dict), "data must be a dict"
         b = list(self.data.keys())[0]
         errmsg = "each item of data must be a pd.DataFrame"
@@ -305,10 +306,13 @@ class LPF:
         if self.use_r1r2:
             imp = self.planet_params.get("imp", (0, 0.1))
             k = self.planet_params["rprs"]
-            r1, r2 = imp_k_to_r1r2(imp[0], k[0], k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX)
-            r1_err, r2_err = imp_k_to_r1r2(
-                imp[1], k[1], k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
-            )
+            # FIXME: imp_k_to_r1r2 is still experimental
+            # r1, r2 = imp_k_to_r1r2(imp[0], k[0], k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX)
+            # r1_err, r2_err = imp_k_to_r1r2(
+            #     imp[1], k[1], k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX
+            # )
+            r1, r2 = 0.5, 0.5
+            r1_err, r2_err = 0.5, 0.5
             params = {
                 "tc": self.tc,
                 "a_Rs": self.planet_params["a_Rs"],
@@ -442,7 +446,7 @@ class LPF:
         if self.use_r1r2:
             tc, a_Rs, r1, r2, d = self.unpack_parameters(pv)
             imp, k = r1r2_to_imp_k(r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX)
-
+            
             # uniform priors
             if (r1 < 0.0) or (r1 > 1.0):
                 if self.DEBUG:
@@ -480,6 +484,7 @@ class LPF:
             if self.DEBUG:
                 print(f"Error (a_Rs): {a_Rs:.2f}<0")
             return np.inf
+        
         if imp / a_Rs >= 1.0:
             if self.DEBUG:
                 print(f"Error (imp/a_Rs): {imp:.2f}/{a_Rs:.2f}>1")
@@ -512,6 +517,14 @@ class LPF:
             trend = np.polyval(c, z) + d[i] * (t - tc)
             model = trend * flux_tr
             chi2 = chi2 + np.sum((f - model) ** 2 / e**2)
+            if self.DEBUG:
+                print(f"k={k[i]:.2f}, ldc={self.ldc[b]}, tc={tc:.4f}, per={per:.4f}, a_Rs={a_Rs:.2f}, inc={inc:.2f}")
+                print(f"flux_tr={flux_tr}")
+                print(f"flux_tr_time={flux_tr_time}")
+                print(f"c={c}")
+                print(f"trend={trend}")
+                print(f"model={model}")
+                print(f"chi2 ({b}): {chi2}")
         # add normal priors
         if tc > 0.:
             chi2 += ((tc - self.tc[0])/self.tc[1])**2
@@ -869,10 +882,12 @@ class LPF:
         """
         end = self.ndim if end is None else end
         if self.use_r1r2 and transform:
-            df = self.get_mcmc_samples(discard=discard, thin=thin)
+            print("Converting r1,r2 --> imp,k")
+            # get a copy, otherwise chain is overwritten
+            df = self.get_mcmc_samples(discard=discard, thin=thin).copy()
+            df["tc"] = df["tc"].values - self.time_offset
             labels = df.columns.values.copy()
             labels[0] = f"tc-{self.time_offset:,}"
-            df["tc"] = df["tc"].values - self.time_offset
             fig = corner.corner(
                 df.iloc[:, start:end], 
                 labels=labels[start:end], 
@@ -1025,7 +1040,7 @@ class LPF:
         for i, b in enumerate(self.bands):
             k = df["k_" + b].values
             k_med = df["k_" + b].median()
-            k_percs = percentile(k)
+            k_percs = get_percentile(k)
             # med, low1, hig1, low2, hig2, low3, hig3
             k_err1 = k_percs[0] - k_percs[1], k_percs[2] - k_percs[0]
             k_err2 = k_percs[0] - k_percs[3], k_percs[4] - k_percs[0]
@@ -1795,7 +1810,7 @@ class LPF:
             savefig(fig, outfile, dpi=300, writepdf=False)
         return fig
 
-    def get_report(self, mcmc_samples_fp=None):
+    def get_report(self, mcmc_samples_fp=None) -> str:
         inst = self.inst.lower()
         txt = f"Title: TIC {self.ticid}{self.alias} ({self.toi_name}) on UT 20{self.date} "
         if inst=='sinistro':
@@ -1832,10 +1847,11 @@ class LPF:
         txt += f"{','.join(list(map(str, depths)))} ppt event using XXX\" uncontaminated/contaminated aperture.\n\n"
         
         try:
+            dt = 2_450_000
             txt += "Typical FWHM: NA\n"
-            txt += f"Predicted Tc: {tc0[0]+self.time_offset-2450000:.6f} ± {tc0[1]:.6f} BJD_TDB\n"
-            txt += f"Measured Tc: {tc-2450000:.6f} ± {tc_sig:.6f} BJD_TDB\n"
-            txt += "NEBcheck stars NOT cleared: NA"
+            txt += f"Predicted Tc: {tc0[0]+self.time_offset-dt:.6f} ± {tc0[1]:.6f} (+{dt}) BJD_TDB\n"
+            txt += f"Measured Tc: {tc-dt:.6f} ± {tc_sig:.6f} (+{dt}) BJD_TDB\n"
+            txt += "NEBcheck stars NOT cleared: NEBs not checked"
         except Exception as e:
             print(e)
         return txt
@@ -1860,7 +1876,7 @@ class Star:
         errmsg = f"{self.source} must be in {sources}"
         assert self.source in sources, errmsg
 
-    def get_tfop_data(self):
+    def get_tfop_data(self) -> None:
         base_url = "https://exofop.ipac.caltech.edu/tess"
         self.exofop_url = (
             f"{base_url}/target.php?id={self.name.replace(' ','')}&json"
@@ -1873,7 +1889,7 @@ class Star:
         except Exception:
             raise ValueError(f"No TIC data found for {self.name}")
 
-    def get_star_params(self):
+    def get_star_params(self) -> None:
         if not hasattr(self, "data_json"):
             self.data_json = self.get_tfop_data()
 
@@ -1953,7 +1969,7 @@ class Star:
             print(e)
             raise ValueError(f"Check exofop: {self.exofop_url}")
 
-    def get_gaia_sources(self, rad_arcsec=30):
+    def get_gaia_sources(self, rad_arcsec=30) -> pd.DataFrame:
         target_coord = SkyCoord(ra=self.ra * u.deg, dec=self.dec * u.deg)
         if (not hasattr(self, "gaia_sources")) or (rad_arcsec > 30):
             msg = f'Querying Gaia sources {rad_arcsec}" around {self.name}: '
@@ -1975,7 +1991,7 @@ class Star:
         assert len(self.gaia_sources) > 1, "gaia_sources contains single entry"
         return self.gaia_sources
 
-    def params_to_dict(self):
+    def params_to_dict(self) -> dict:
         return {
             "rstar": self.rstar,
             "mstar": self.rstar,
@@ -2096,7 +2112,7 @@ class Planet(Star):
             print(e)
             raise ValueError(f"Check exofop: {self.exofop_url}")
 
-    def params_to_dict(self):
+    def params_to_dict(self) -> dict:
         return {
             "t0": self.t0,
             "period": self.period,
@@ -2155,7 +2171,7 @@ def get_toi_ephem(
     return vals
 
 
-def tdur_from_per_imp_aRs_k(per, imp, a_Rs, k):
+def tdur_from_per_imp_aRs_k(per, imp, a_Rs, k) -> float:
     # inc = np.arccos(imp / a_Rs)
     cosi = imp / a_Rs
     sini = np.sqrt(1.0 - cosi**2)
@@ -2166,46 +2182,42 @@ def tdur_from_per_imp_aRs_k(per, imp, a_Rs, k):
     )
 
 
-def r1r2_to_imp_k(r1, r2, k_lo=0.01, k_up=0.5):
+def r1r2_to_imp_k(r1, r2, k_lo=0, k_up=1) -> tuple:
     """
     Efficient Joint Sampling of Impact Parameters and
     Transit Depths in Transiting Exoplanet Light Curves
     Espinosa+2018: RNAAS, 2 209
     https://iopscience.iop.org/article/10.3847/2515-5172/aaef38
     """
-    Ar = (k_up - k_lo) / (2.0 + k_lo + k_up)
-    if r1 > Ar:
-        imp = (1.0 + k_lo) * (1.0 + ((r1 - 1.0) / (1.0 - Ar)))
-        k = (1.0 - r2) * k_lo + r2 * k_up
+    A_r = (k_up-k_lo) / (2.0+k_lo+k_up)
+    if r1 > A_r:
+        imp = (1.0+k_lo) * (1.0+(r1-1.0)/(1.0-A_r))
+        k = (1.0-r2)*k_lo + r2*k_up
     else:
-        q1 = r1 / Ar
-        imp = (1.0 + k_lo) + np.sqrt(q1) * r2 * (k_up - k_lo)
-        k = k_up + (k_lo - k_up) * np.sqrt(q1) * (1.0 - r2)
+        #FIXME: added mean if r2 is a vector so imp is not a vector
+        imp = (1.0+k_lo) + np.sqrt(r1/A_r)*np.mean(r2) * (k_up-k_lo)
+        k = k_up + (k_lo-k_up) * np.sqrt(r1/A_r)*(1.0-r2)
+    assert isinstance(imp, float)
     return imp, k
 
 
-def imp_k_to_r1r2(imp, k, k_lo=0.01, k_up=0.5):
+def imp_k_to_r1r2(imp, k, k_lo=0.01, k_up=0.5) -> tuple:
     """
     Inverse function for r1r2_to_imp_k function.
     """
-    Ar = (k_up - k_lo) / (2.0 + k_lo + k_up)
-    discriminant = 1.0 + 4.0 * (1.0 - Ar) * (imp - (1.0 + k_lo))
-
-    if discriminant >= 0:
-        # Case r1 > Ar
-        r1 = (1.0 + k_lo + np.sqrt(discriminant)) / (2.0 * (1.0 - Ar))
-        r2 = (k - (1.0 - r1) * k_lo) / (r1 * k_up)
+    raise NotImplemented
+    
+    A_r = (k_up-k_lo) / (2.0+k_lo+k_up)
+    imp_threshold = (1.0 + k_lo)
+    if imp > imp_threshold:
+        r1 = (-A_r*i + A_r*k_lo + A_r + i)/(k_lo + 1.0)
+        r2 = (k_lo - k)/(k_lo - k_up)
     else:
-        # Case r1 <= Ar
-        q1 = ((1.0 + k_lo) - imp) / (k_up - k_lo)
-        q2 = (k_up - k) / (k_up - k_lo * np.sqrt(q1))
-        r1 = Ar * q1
-        r2 = q2
-
+        r1 = k_lo + 1.0
+        r2 = k_lo*np.sqrt(r1/A_r) - k_up*np.sqrt(r1/A_r) + k_up
     return r1, r2
 
-
-def tdur_from_per_aRs_r1_r2(per, a_Rs, r1, r2):
+def tdur_from_per_aRs_r1_r2(per, a_Rs, r1, r2) -> float:
     imp, k = r1r2_to_imp_k(r1, r2, k_lo=PRIOR_K_MIN, k_up=PRIOR_K_MAX)
     # inc = np.arccos(imp / a_Rs)
     cosi = imp / a_Rs
@@ -2217,7 +2229,7 @@ def tdur_from_per_aRs_r1_r2(per, a_Rs, r1, r2):
     )
 
 
-def binning_equal_interval(t, y, ye, binsize, t0):
+def binning_equal_interval(t, y, ye, binsize, t0) -> tuple:
     intt = np.floor((t - t0) / binsize)
     intt_unique = np.unique(intt)
     n_unique = len(intt_unique)
@@ -2235,7 +2247,7 @@ def binning_equal_interval(t, y, ye, binsize, t0):
     return tbin, ybin, yebin
 
 
-def percentile(array):
+def get_percentile(array: list) -> float:
     med = np.median(array)
     low1 = np.percentile(array, 15.85)
     hig1 = np.percentile(array, 84.15)
