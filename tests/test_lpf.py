@@ -7,6 +7,7 @@ from tfop_analysis import LPF  # Replace 'your_module' with the actual module na
 from matplotlib.figure import Figure
 
 target = "TOI-6449"
+toi_name = "TOI 6449.01"
 ticid = "168936945"
 phot_dir = "../data"
 date = "240128"
@@ -54,6 +55,7 @@ def sample_inputs():
     # Provide sample data for testing
     return {
         "name": target,
+        "toi_name": toi_name,
         "ticid": ticid,
         "date": date,
         "data": read_phot_data(phot_dir, date),
@@ -70,9 +72,9 @@ def test_lpf(sample_inputs):
 
     # assert isinstance(lpf_instance.plot_raw_data(), Figure)
     p0 = [v[0] for k, v in lpf_instance.model_params.items()]
-    assert isinstance(lpf_instance.get_chi2_chromatic_transit(p0), float)
+    assert isinstance(lpf_instance.get_chi2_transit(p0), float)
     while True:
-        lpf_instance.optimize_chromatic_transit(p0)
+        lpf_instance.optimize_chi2_transit(p0)
         if lpf_instance.opt_result.success:
             break
     pv = lpf_instance.optimum_params
@@ -101,8 +103,9 @@ def test_lpf(sample_inputs):
         font_size=18,
     )
     assert isinstance(fig, Figure)
-    ref_fits_file_path = f"{phot_dir}/ref-coj2m002-ep09-20240128-0075-e91.fits"
-    ref_obj_file_path = f"{phot_dir}/ref-coj2m002-ep09-20240128-0075-e91.objects"
+    ref_name = "ref-coj2m002-ep07-20240128-0077-e91"
+    ref_fits_file_path = f"{phot_dir}/{ref_name}.fits"
+    ref_obj_file_path = f"{phot_dir}/{ref_name}.objects"
     fig = lpf_instance.plot_fov(
         ra,
         dec,
@@ -116,7 +119,6 @@ def test_lpf(sample_inputs):
         scale_color="w",
         font_size=20,
         title_height=0.99,
-        show_target=True,
     )
     assert isinstance(fig, Figure)
     fig = lpf_instance.plot_fov_zoom(
