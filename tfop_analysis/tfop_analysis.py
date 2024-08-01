@@ -136,7 +136,7 @@ class LPF:
     alias: str = ".01"
     bands: List[str] = None
     model: str = "chromatic"
-    time_offset: float = None
+    # time_offset: float = None
     covariate: str = "Airmass"
     lm_order: int = 1
     mask_start: float = None
@@ -199,11 +199,7 @@ class LPF:
             tdiff = (self.mask_end - self.mask_start) * 60 * 24
             print(f"Masking {tdiff:.1f} min of data.")
 
-        if self.time_offset is None:
-            if self.obs_start > 2_450_000:
-                self.time_offset = 2_450_000
-            else:
-                self.time_offset = np.floor(self.obs_start)
+        self.time_offset = np.floor(self.obs_start)
         errmsg = f"`time_offset` is too big. Observation ended at {self.obs_end}."
         assert self.time_offset < self.obs_end, errmsg
 
@@ -219,10 +215,6 @@ class LPF:
         errmsg = f"model is either {' or '.join(models)}"
         assert self.model in models, errmsg
 
-        # if np.all([self.ingress, self.egress]):
-        #     assert (self.ingress-self.time_offset-self.obs_start)<0
-        #     assert (self.egress-self.time_offset-self.obs_end)>0
-
         if self.DEBUG:
             print("==========")
             print("DEBUG MODE")
@@ -231,7 +223,7 @@ class LPF:
             print("obs_end", self.obs_end)
             print("bands", self.bands)
             print("nband", self.nband)
-            print("time_offset", self.time_offset)
+            print(f"time_offset {self.time_offset:,}")
 
     def _init_data(self):
         """initialize user-given photometry data"""
@@ -599,9 +591,9 @@ class LPF:
             self.sampler.run_mcmc(state, self.nsteps, progress=True)
 
         # Extract and analyze the results
-        self.analyze_mcmc_results()
+        self._analyze_mcmc_results()
         
-    def analyze_mcmc_results(self):
+    def _analyze_mcmc_results(self):
         log_prob = self.sampler.get_log_prob()
         argmax = np.argmax(log_prob)
         self.best_fit_params = self.sampler.flatchain[argmax]

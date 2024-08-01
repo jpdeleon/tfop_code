@@ -1,0 +1,65 @@
+================================
+ Notes on the MuSCAT3 observation
+================================
+
+Akihiko Fukui (University of Tokyo), on behalf of the MuSCAT team.
+
+
+[Instrument information]
+
+  Site: Haleakala, Hawaii
+        Longitude: 156:15:21.6
+        Latitude:  +20:42:27
+        Altitude:  3055 m
+
+  Telescope: FTN 2m of LCOGT
+
+  Instrument: MuSCAT3 (g, r, i, and z_s band simultaneous imager)
+              (N. Narita et al. 2020, SPIE, 114475K)
+
+  FoV: 9.1' x 9.1'
+  Pixel scale: 0.266 [arcsec/pixel]
+
+
+[Summary of the observation]
+
+  Exposure times: 30, 9, 13, 7 sec for g, r, i, z bands
+  Aperture radii: 18, 18, 18, 18 pixels for g, r, i, z bands
+
+ -----------
+
+We observed a full transit of TOI-6251.01 in g,r,i,zs bands with MuSCAT3 on the night of July 21, 2023 in local time (HST). We marginally detected a transit signal on target with a timing consistent with the prediction assuming the orbital period of 12.76d (half of the period in the TOI catalog).
+
+The mid-transit time (Tc), measured with an achromatic transit model with a prior on T14 from the TESS data, is as follows:
+
+Tc (BJD_TDB) = 2460148.0182 +0.0013 -0.0007
+
+
+
+[README of the uploaded files]
+
+- TOI-6251.01L-af20230722_MuSCAT3_FOV.png
+
+  Field image of the MuSCAT3 observation.
+  The target star is indicated by blue circle (ID=1).
+  The comparison stars used to produce the light curves are ID=2,3,4,5 for g, r, i and z_s bands.
+
+
+- TOI-6251.01L-af20230722_MuSCAT3_[band]_measurements.csv
+
+  Target star's light curves and auxiliary data in csv format.
+
+  BJD_TDB: time in BJD_TDB
+  Flux: normalized and un-detrended target flux
+  Err: error in flux
+  Airmass: calculated airmass
+  Dx(pix), Dy(pix): relative centroid position of stars in x and y (pixel)
+  FWHM(pix): FWHM of stellar PSF (pixel)
+  Peak(ADU): Peak count of the brighest stars among target and comparison stars (ADU)
+
+
+- TOI-6251.01L-af20230722_MuSCAT3_lcfit.pdf
+
+  Un-detrended light curves fitted with a chromatic transit + Gaussian process model. The expected transit ingress, center, and egress from TESS data are indicated by light-blue vertical lines.
+
+

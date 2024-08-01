@@ -1,0 +1,19 @@
+TIC 253864764.01 (TOI 6678.01) on UT2024.05.14
+LCO-SAAO-1m0 (zs, exp=20s, fap=14-24-36, foc=1.0mm)
+
+ChrisS/LCO-SAAO-1m0 analysed a full on 20240514 in zs and detected a 12 min (0.13σ) early 
+12 min (0.4σ) longer 1 ppt event using an uncontaminated 5.4" target aperture.
+
+1. Aperture radius = 5.4"
+2. Typical FWHM    = 3.0" 
+3. Predicted Tc    = 10444.5684
+4. Measured Tc     = 10444.5598
+
+TTF Description	
+VPC? VPC? qlp-s67-ffi Sectors:[67]: [P=3.4268387] rotational modulation at 7-8 days may indicate 
+young host star; Rick Schwarz/ LCO-CTIO-1m0 analyzed a full on 20240406 in zs and maybe detected 
+a ~32 min (0.4σ) late ~0.9 ppt event using an uncontaminated 5.8" target aperture and cleared 69/69 
+neighbors for NEBs to 2.5'. [P=3.4271320]. The next observation should be a high precision 
+(<1.0 ppt/10 min) full transit in a red (r', R, i', I, z, Y) filter to attempt a firm detection 
+of the event on target at the revised ephemeris. Multi-band or blue (U, u', B, g') filter 
+observations even better for a simultaneous chromaticity check.

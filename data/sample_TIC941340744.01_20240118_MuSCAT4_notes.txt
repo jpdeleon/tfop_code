@@ -1,0 +1,70 @@
+================================
+ Notes on the MuSCAT4 observation
+================================
+
+Jerome de Leon (University of Tokyo), on behalf of the MuSCAT4 team.
+
+
+[Instrument information]
+
+  Site: Siding Spring Observatory in New South Wales, Australia
+        Longitude: 149° 4' 15.6" E
+        Latitude:  31° 16' 23.88" S
+        Altitude:  1,165 m
+
+  Telescope: LCO's 2-meter Faulke's Telescope South (FTS) at Siding Spring Observatory
+
+  Instrument: MuSCAT4 (gp, rp, ip, and zs band simultaneous imager)
+  			  MuSCAT3 instrument paper: N. Narita et al. 2020, Proceedings of the SPIE, Volume 11447, id. 114475K 7 pp. (2020)
+  MuSCAT4 is very similar to MuSCAT3. See LCO page for details: https://lco.global/observatory/instruments/muscat/
+  FoV: 9.1' x 9.1'
+  Pixel scale: 0.27 [arcsec/pixel]
+
+
+[Summary of the observation]
+
+  Exposure times: 7, 5, 10, 8 sec for gp, rp, ip, zs bands
+  Aperture radii: 16 pixels or 4.3" for all bands
+
+ -----------
+
+We observed a full transit of TOI-3353.01 in gp,rp,ip,zs bands with FTS-2m/MuSCAT4 in LCO/Siding Spring Observatory, New South Wales, Australia on the night of Jan 18, 2024 (UTC). 
+We observed a full on 20240118 in gp, rp, ip, zs and detected a ~16-min late (~6 sigma) (Rp/R*)^2: 0.71, 0.92, 0.70, 1.2 ppt event using 4.3'' uncontaminated target aperture. We fit a chromatic transit model assuming a normal prior on transit duration. The radius ratios are consistent i.e. achromatic within 1-sigma. The feature around mid-transit is not clear if due to clouds or a flare. Excluding the data around mid-transit does not change the result significantly.
+
+The mid-transit time (Tc), measured with a chromatic transit model, is as follows:
+
+Tc (BJD_TDB) = Tc = 2460328.1256-0.0011+0.0012
+Rp/Rs(g)^2 = 0.71 ppt
+Rp/Rs(r)^2 = 0.92 ppt
+Rp/Rs(i)^2 = 0.70 ppt
+Rp/Rs(z)^2 = 1.20 ppt
+
+[README of the uploaded files]
+
+- TOI03353.01-20240118_MuSCAT4_[band]_FOV.png
+
+  Field image of the MuSCAT4 observation.
+  The target star is indicated by red circle (ID=14).
+  The comparison star IDs=2,3,4,5,6,7,8 are used to produce the light curves for all bands.
+
+
+- TOI03353.01-20240118_MuSCAT4_[band]_measurements.csv
+
+  Target star's light curves and auxiliary data in csv format.
+
+  BJD_TDB: time in BJD_TDB
+  Flux: normalized and un-detrended target flux
+  Err: error in flux
+  Airmass: calculated airmass
+  dX(pix), dY(pix): relative centroid position of stars in x and y (pixel)
+  FWHM(pix): FWHM of stellar PSF (pixel)
+  Peak(ADU): Peak count of the brighest stars among target and comparison stars (ADU)
+
+
+- TOI03353.01-20240118_MuSCAT4_[bands]_lc_chromatic.pdf
+
+  Un-detrended light curves fitted with a chromatic transit + linear systematics model. The expected transit ingress and egress from TESS data are indicated by light-blue vertical lines.
+  
+- TOI03353.01-20240118_MuSCAT4_[bands]_lcfit_chromatic.pdf
+
+  Left panel shows radius ratios for each band and TESS. Right panel shows histogram for mid-transit posterior and normal curve for mid-transit prediction.
