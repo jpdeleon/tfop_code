@@ -11,6 +11,7 @@ User-friedly features include:
   - specifying covariates (default=Airmass)
   - polynomial order of linear model (default=1)
 * shows useful plots: quicklook, raw data, posteriors, FOV, FOV with gaia sources, etc
+* checks for simbad objects including known variable stars within FOV
 * implements new parameterization for efficient sampling of impact parameter and Rp/Rs
   (Espinosa+2018: https://iopscience.iop.org/article/10.3847/2515-5172/aaef38)
 
@@ -44,6 +45,7 @@ import astropy.units as u
 from astropy.visualization.wcsaxes import SphericalCircle  # , add_scalebar
 from astropy.coordinates import SkyCoord
 from astroquery.mast import Catalogs
+from astroquery.simbad import Simbad
 from aesthetic.plot import savefig
 import emcee
 import corner
@@ -147,6 +149,9 @@ class LPF:
 
     def __post_init__(self):
         self.date = str(self.date)
+        self.target_coord = SkyCoord(ra=self.star_params['ra'], 
+                                     dec=self.star_params['dec'], 
+                                     unit='deg')
         self._validate_inputs()
         self._init_data()
         self._init_params()
@@ -1430,10 +1435,9 @@ class LPF:
         )
         return ax
 
+    
     def plot_fov(
         self,
-        ra: float,
-        dec: float,
         ref_fits_file_path: str,
         ref_obj_file_path: str,
         target_ID : int = None,
@@ -1471,6 +1475,7 @@ class LPF:
             names=columns,
             delim_whitespace=True,
         )
+        self.ref_obj_from_afphot = df
         star_ids = df["id"].values
         refxy = df[["x", "y"]].values
         coords = wcs.all_pix2world(refxy, 0)
@@ -1490,9 +1495,11 @@ class LPF:
 
         # target
         rad_marker = phot_aper_pix * pixscale
+        target_ra = self.target_coord.ra.deg
+        target_dec = self.target_coord.dec.deg
         if target_ID:
             c = SphericalCircle(
-                (ra * u.deg, dec * u.deg),
+                (target_ra * u.deg, target_dec * u.deg),
                 rad_marker * u.arcsec,
                 edgecolor=target_color,
                 facecolor="none",
@@ -1558,8 +1565,6 @@ class LPF:
 
     def plot_fov_zoom(
         self,
-        ra: float,
-        dec: float,
         ref_fits_file_path: str,
         ref_obj_file_path: str,
         zoom_rad_arcsec: float,
@@ -1608,12 +1613,14 @@ class LPF:
         refxy = df[["x", "y"]].values
         coords = wcs.all_pix2world(refxy, 0)
         # filter those within zoom_rad_arcsec
-        sep = SkyCoord(coords * u.deg).separation(SkyCoord(ra, dec, unit="deg"))
+        target_ra = self.target_coord.ra.deg
+        target_dec = self.target_coord.dec.deg
+        sep = SkyCoord(coords * u.deg).separation(self.target_coord)
         idx = sep < zoom_rad_arcsec * u.arcsec
         coords = coords[idx]
         star_ids = star_ids[idx]
-
-        xy = wcs.all_world2pix(np.c_[ra, dec], 0)
+        
+        xy = wcs.all_world2pix(np.c_[target_ra, target_dec], 0)
         xpix, ypix = int(xy[0][0]), int(xy[0][1])
         dx = dy = round(zoom_rad_arcsec / pixscale)
         dcrop = data[ypix - dy : ypix + dy, xpix - dx : xpix + dx]
@@ -1801,6 +1808,119 @@ class LPF:
             outfile = f"{self.outdir}/{self.outfile_prefix}_gaia_sources{suffix}"
             savefig(fig, outfile, dpi=300, writepdf=False)
         return fig
+    
+    def plot_fov_obj_types(
+        self,
+        ref_fits_file_path: str,
+        fov_simbad_arcsec : float = None,
+        target_color: str = "red",
+        cmap: str = "gray",
+        contrast: float = 0.5,
+        text_offset: tuple = (0, 0),
+        phot_aper_pix: int = 10,
+        title: str = None,
+        title_height: float = 1.0,
+        font_size: float = 20,
+        figsize: tuple = (10, 10),
+        save: bool = False,
+        show_grid: bool = False,
+        suffix: str = ".pdf",
+    ):
+        """
+        Simbad object types within Field of View
+        """
+        dr, dd = text_offset
+
+        header = fits.getheader(ref_fits_file_path)
+        data = fits.getdata(ref_fits_file_path)
+        wcs = WCS(header)
+        pixscale = header["PIXSCALE"]
+        band = header["FILTER"]
+
+        title = (
+            f"{self.name}\n{self.inst} {band[0]}-band" if title is None else title
+        )
+
+        fig = plt.figure(figsize=figsize)
+        fig.subplots_adjust(
+            top=title_height
+        )  # Adjusted subplots_adjust to give more space to the title
+        ax = fig.add_subplot(111, projection=wcs)
+        norm = ImageNormalize(data, interval=ZScaleInterval(contrast=contrast))
+        ax.imshow(data, norm=norm, origin="lower", cmap=cmap)
+
+        # target
+        target_ra = self.target_coord.ra.deg
+        target_dec = self.target_coord.dec.deg
+        rad_marker = phot_aper_pix * pixscale
+        c = SphericalCircle(
+            (target_ra * u.deg, target_dec * u.deg),
+            rad_marker * u.arcsec,
+            edgecolor='red',
+            facecolor="none",
+            lw=3,
+            zorder=10,
+            transform=ax.get_transform("fk5"),
+        )
+        ax.add_patch(c)
+
+        simbad_data = self.get_simbad_data(fov_arcsec=fov_simbad_arcsec)
+        otypes = list(simbad_data['OTYPE'].unique())
+        color_map = plt.get_cmap('viridis')
+        obj_colors = color_map(np.linspace(0, 1, len(otypes)))
+        color_mapping = {t: obj_colors[i] for i, t in enumerate(otypes)}
+
+        coords = SkyCoord(ra=simbad_data.RA, dec=simbad_data.DEC, 
+                          unit=(u.hourangle,u.degree))
+        obj_coords = np.c_[coords.ra.deg,coords.dec.deg]
+        for i, (r, d) in enumerate(obj_coords):
+            t = simbad_data.iloc[i]['OTYPE']
+            c = SphericalCircle(
+                (r * u.deg, d * u.deg),
+                rad_marker * u.arcsec,
+                edgecolor=color_mapping[t],
+                facecolor="none",
+                lw=2,
+                transform=ax.get_transform("fk5"),
+            )
+            ax.add_patch(c)
+            ax.text(
+                r + dr,
+                d + dd,
+                t,
+                fontsize=20,
+                color=color_mapping[t],
+                transform=ax.get_transform("fk5"),
+            )
+        ax.set_xlim(0, data.shape[1])
+        ax.set_ylim(0, data.shape[0])
+        fig.suptitle(title, y=title_height, fontsize=font_size)
+        ax.set_ylabel("Dec")
+        ax.set_xlabel("RA")
+        if show_grid:
+            ax.grid()
+        fig.tight_layout()
+        if save:
+            outfile = f"{self.outdir}/{self.outfile_prefix}_FOV{suffix}"
+            savefig(fig, outfile, dpi=300, writepdf=False)
+        return fig
+    
+    def get_simbad_data(self, fov_arcsec=None):
+        Simbad.add_votable_fields("otype")
+        
+        fov_inst = fovs[self.inst.lower()]*60
+        fov = fov_arcsec if fov_arcsec else fov_inst
+        if hasattr(self, 'simbad_data'):
+            df = self.simbad_data
+        else:
+            df = Simbad.query_region(self.target_coord, 
+                                     radius=fov*u.arcsec).to_pandas()
+            self.simbad_data = df
+        # limit
+        coords = SkyCoord(ra=df.RA, dec=df.DEC, 
+                          unit=(u.hourangle,u.degree))
+        idx = coords.separation(self.target_coord)<fov*u.arcsec
+        return df[idx]
 
     def get_report(self, mcmc_samples_fp=None) -> str:
         inst = self.inst.lower()
@@ -1985,6 +2105,8 @@ class Star:
 
     def params_to_dict(self) -> dict:
         return {
+            "ra": self.ra,
+            "dec": self.dec,
             "rstar": self.rstar,
             "mstar": self.rstar,
             "rhostar": self.rhostar,
