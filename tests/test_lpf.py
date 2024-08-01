@@ -14,6 +14,8 @@ date = "240128"
 ra, dec = 125.93045, -5.18949
 
 star_params = {
+    "ra": ra,
+    "dec": dec,
     "rstar": (0.454183, 0.0155273),
     "mstar": (0.454183, 0.0155273),
     "rhostar": (4.813903712185822, 0.5460704755765515),
@@ -107,8 +109,6 @@ def test_lpf(sample_inputs):
     ref_fits_file_path = f"{phot_dir}/{ref_name}.fits"
     ref_obj_file_path = f"{phot_dir}/{ref_name}.objects"
     fig = lpf_instance.plot_fov(
-        ra,
-        dec,
         ref_fits_file_path,
         ref_obj_file_path,
         phot_aper_pix=30,
@@ -122,8 +122,6 @@ def test_lpf(sample_inputs):
     )
     assert isinstance(fig, Figure)
     fig = lpf_instance.plot_fov_zoom(
-        ra,
-        dec,
         ref_fits_file_path,
         ref_obj_file_path,
         zoom_rad_arcsec=60,
