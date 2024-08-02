@@ -161,8 +161,7 @@ class LPF:
         )
         if not Path(self.outdir).exists():
             Path(self.outdir).mkdir()
-        self.outfile_prefix = f"{self.ticid}{self.alias}_20{self.date}"
-        self.outfile_prefix += f"_{self.inst}_{''.join(self.bands)}_{self.model}"
+        self.outfile_prefix = f"{self.outdir}/{self.ticid}{self.alias}_20{self.date}_{self.inst}"
         self._mcmc_samples = None
 
     def _validate_inputs(self):
@@ -204,7 +203,7 @@ class LPF:
             tdiff = (self.mask_end - self.mask_start) * 60 * 24
             print(f"Masking {tdiff:.1f} min of data.")
 
-        self.time_offset = np.floor(self.obs_start)
+        self.time_offset = int(self.obs_start)
         errmsg = f"`time_offset` is too big. Observation ended at {self.obs_end}."
         assert self.time_offset < self.obs_end, errmsg
 
@@ -1014,7 +1013,7 @@ class LPF:
         font_size: float = 12,
         nsigma: float = 3,
         save: bool = False,
-        suffix: str = ".pdf",
+        suffix: str = "pdf",
     ):
         """
         plot Rp/Rs, Tc and impact parameter posteriors
@@ -1125,8 +1124,9 @@ class LPF:
             f"{self.date4plot}, {self.inst}", loc="right", fontsize=font_size * 1.5
         )
         if save:
-            outfile = f"{self.outdir}/{self.outfile_prefix}_posteriors"
-            outfile += suffix if self.mask_start is None else f"_mask{suffix}"
+            outfile_prefix = self.outfile_prefix+f"_{''.join(self.bands)}_{self.model}"
+            outfile = f"{outfile_prefix}_posteriors"
+            outfile += suffix if self.mask_start is None else f"_mask.{suffix}"
             savefig(fig, outfile, dpi=300, writepdf=False)
         return fig
 
@@ -1153,7 +1153,7 @@ class LPF:
             figsize: tuple = (16, 12),
             binsize: float = 600 / 86400,
             save: bool = False,
-            suffix: str = ".pdf",
+            suffix: str = "pdf",
         ):
             ymin1, ymax1 = ylims_top
             ymin2, ymax2 = ylims_bottom
@@ -1351,8 +1351,9 @@ class LPF:
                 )
             ax2.legend(loc="lower right", fontsize=12)
             if save:
-                outfile = f"{self.outdir}/{self.outfile_prefix}_transit_fit"
-                outfile += suffix if self.mask_start is None else f"_mask{suffix}"
+                outfile_prefix = self.outfile_prefix+f"_{''.join(self.bands)}_{self.model}"
+                outfile = f"{outfile_prefix}_transit_fit"
+                outfile += suffix if self.mask_start is None else f"_mask.{suffix}"
                 savefig(fig, outfile, dpi=300, writepdf=False)
             return fig
 
@@ -1444,20 +1445,20 @@ class LPF:
         target_color: str = "red",
         cIDs: list = None,
         cIDs_color: str = "blue",
-        cmap: str = "gray",
-        contrast: float = 0.5,
+        cmap: str = "gray_r",
+        contrast: float = 0.1,
         text_offset: tuple = (0, 0),
         phot_aper_pix: int = 10,
         title: str = None,
-        title_height: float = 1.0,
+        title_height: float = 0.95,
         font_size: float = 20,
         show_scale_bar: bool = True,
         marker_color: str = "yellow",
         scale_color: str = "white",
-        figsize: tuple = (10, 10),
+        figsize: tuple = (8, 8),
         show_grid: bool = True,
         save: bool = False,
-        suffix: str = ".pdf",
+        suffix: str = "pdf",
     ):
         """
         Field of View given reference image produced by AFPHOT pipeline
@@ -1497,22 +1498,10 @@ class LPF:
         rad_marker = phot_aper_pix * pixscale
         target_ra = self.target_coord.ra.deg
         target_dec = self.target_coord.dec.deg
-        if target_ID:
-            c = SphericalCircle(
-                (target_ra * u.deg, target_dec * u.deg),
-                rad_marker * u.arcsec,
-                edgecolor=target_color,
-                facecolor="none",
-                lw=3,
-                zorder=10,
-                transform=ax.get_transform("fk5"),
-            )
-            ax.add_patch(c)
-            # ax.text(ra+dr, dec+dd, 'target', fontsize=20,
-            #         color='red', transform=ax.get_transform('fk5'))
         for i, (r, d) in enumerate(coords):
             j = int(star_ids[i])
             mcolor = marker_color
+            lw = 2
             if cIDs:
                 cIDs = [int(c) for c in cIDs]
                 if j in cIDs:
@@ -1520,12 +1509,13 @@ class LPF:
             if target_ID:
                 if j==int(target_ID):
                     mcolor = target_color
+                    lw = 3
             c = SphericalCircle(
                 (r * u.deg, d * u.deg),
                 rad_marker * u.arcsec,
                 edgecolor=mcolor,
                 facecolor="none",
-                lw=2,
+                lw=lw,
                 transform=ax.get_transform("fk5"),
             )
             ax.add_patch(c)
@@ -1559,7 +1549,7 @@ class LPF:
             ax.grid()
         fig.tight_layout()
         if save:
-            outfile = f"{self.outdir}/{self.outfile_prefix}_FOV{suffix}"
+            outfile = f"{self.outfile_prefix}_{band[0]}_FOV.{suffix}"
             savefig(fig, outfile, dpi=300, writepdf=False)
         return fig
 
@@ -1568,22 +1558,23 @@ class LPF:
         ref_fits_file_path: str,
         ref_obj_file_path: str,
         zoom_rad_arcsec: float,
-        show_target: bool = False,
-        cmap: str = "gray",
-        contrast: float = 0.5,
+        target_ID: int = None,
+        target_color: str = "red",
+        cmap: str = "gray_r",
+        contrast: float = 0.1,
         text_offset: tuple = (0, 0),
         phot_aper_pix: int = 10,
         title: str = None,
-        title_height: float = 1.0,
+        title_height: float = 0.95,
         font_size: float = 20,
         show_scale_bar: bool = True,
         bar_arcsec=None,
         marker_color: str = "yellow",
         scale_color: str = "w",
-        figsize: tuple = (10, 10),
+        figsize: tuple = (8, 8),
         show_grid: bool = True,
         save: bool = False,
-        suffix: str = ".pdf",
+        suffix: str = "pdf",
     ):
         """
         Zoomed-in FOV
@@ -1634,33 +1625,20 @@ class LPF:
 
         # target
         rad_marker = phot_aper_pix * pixscale
-        if show_target:
-            c = SphericalCircle(
-                (ra * u.deg, dec * u.deg),
-                rad_marker * u.arcsec,
-                edgecolor="red",
-                facecolor="none",
-                lw=3,
-                zorder=10,
-                transform=ax.get_transform("fk5"),
-            )
-            ax.add_patch(c)
-            ax.text(
-                ra + dr,
-                dec + dd,
-                "target",
-                fontsize=20,
-                color="red",
-                transform=ax.get_transform("fk5"),
-            )
         for i, (r, d) in enumerate(coords):
             j = int(star_ids[i])
+            mcolor = marker_color
+            lw = 2
+            if target_ID:
+                if j==int(target_ID):
+                    mcolor = target_color
+                    lw = 3
             c = SphericalCircle(
                 (r * u.deg, d * u.deg),
                 rad_marker * u.arcsec,
-                edgecolor=marker_color,
+                edgecolor=mcolor,
                 facecolor="none",
-                lw=2,
+                lw=lw,
                 transform=ax.get_transform("fk5"),
             )
             ax.add_patch(c)
@@ -1669,7 +1647,7 @@ class LPF:
                 d + dd,
                 str(j),
                 fontsize=20,
-                color=marker_color,
+                color=mcolor,
                 transform=ax.get_transform("fk5"),
             )
         ax.set_xlim(0, dcrop.shape[1])
@@ -1696,7 +1674,7 @@ class LPF:
             ax.grid()
         fig.tight_layout()
         if save:
-            outfile = f"{self.outdir}/{self.outfile_prefix}_FOV_zoom{suffix}"
+            outfile = f"{self.outfile_prefix}_{band[0]}_FOV_zoom.{suffix}"
             savefig(fig, outfile, dpi=300, writepdf=False)
         return fig
 
@@ -1709,17 +1687,17 @@ class LPF:
         bar_arcsec: float = 30,
         text_offset: tuple = (0, 0),
         fov_padding: float = 1.1,
-        title_height: float = 1,
-        figsize: tuple = (10, 10),
+        title_height: float = 0.95,
+        figsize: tuple = (8, 8),
         title: str = None,
         marker_color: str = "yellow",
         scale_color: str = "w",
-        cmap: str = "gray",
-        contrast: float = 0.5,
+        cmap: str = "gray_r",
+        contrast: float = 0.1,
         font_size: float = 20,
         show_grid: bool = True,
         save: bool = False,
-        suffix: str = ".pdf",
+        suffix: str = "pdf",
     ):
         """
         plots gaia sources on the given fits image and zoomed up
@@ -1805,26 +1783,27 @@ class LPF:
             ax.grid()
         fig.tight_layout()
         if save:
-            outfile = f"{self.outdir}/{self.outfile_prefix}_gaia_sources{suffix}"
+            outfile = f"{self.outfile_prefix}_gaia_sources.{suffix}"
             savefig(fig, outfile, dpi=300, writepdf=False)
         return fig
     
-    def plot_fov_obj_types(
+    def plot_fov_simbad(
         self,
         ref_fits_file_path: str,
         fov_simbad_arcsec : float = None,
-        target_color: str = "red",
-        cmap: str = "gray",
-        contrast: float = 0.5,
+        target_color: str = "white",
+        cmap: str = "gray_r",
+        cmap_marker: str = "hsv",
+        contrast: float = 0.1,
         text_offset: tuple = (0, 0),
         phot_aper_pix: int = 10,
         title: str = None,
-        title_height: float = 1.0,
+        title_height: float = 0.95,
         font_size: float = 20,
-        figsize: tuple = (10, 10),
+        figsize: tuple = (8, 8),
         save: bool = False,
-        show_grid: bool = False,
-        suffix: str = ".pdf",
+        show_grid: bool = True,
+        suffix: str = "pdf",
     ):
         """
         Simbad object types within Field of View
@@ -1856,7 +1835,7 @@ class LPF:
         c = SphericalCircle(
             (target_ra * u.deg, target_dec * u.deg),
             rad_marker * u.arcsec,
-            edgecolor='red',
+            edgecolor=target_color,
             facecolor="none",
             lw=3,
             zorder=10,
@@ -1866,7 +1845,7 @@ class LPF:
 
         simbad_data = self.get_simbad_data(fov_arcsec=fov_simbad_arcsec)
         otypes = list(simbad_data['OTYPE'].unique())
-        color_map = plt.get_cmap('viridis')
+        color_map = plt.get_cmap(cmap_marker)
         obj_colors = color_map(np.linspace(0, 1, len(otypes)))
         color_mapping = {t: obj_colors[i] for i, t in enumerate(otypes)}
 
@@ -1901,11 +1880,15 @@ class LPF:
             ax.grid()
         fig.tight_layout()
         if save:
-            outfile = f"{self.outdir}/{self.outfile_prefix}_FOV{suffix}"
+            outfile = f"{self.outfile_prefix}_{band[0]}_FOV_simbad.{suffix}"
             savefig(fig, outfile, dpi=300, writepdf=False)
         return fig
     
     def get_simbad_data(self, fov_arcsec=None):
+        """
+        See Simbad object types:
+        https://simbad.cds.unistra.fr/Pages/guide/otypes.htx
+        """
         Simbad.add_votable_fields("otype")
         
         fov_inst = fovs[self.inst.lower()]*60
@@ -1923,15 +1906,18 @@ class LPF:
         return df[idx]
 
     def get_report(self, mcmc_samples_fp=None) -> str:
+        """
+        Show report using print(get_report())
+        """
         inst = self.inst.lower()
         txt = f"Title: TIC {self.ticid}{self.alias} ({self.toi_name}) on UT 20{self.date} "
-        if inst=='sinistro':
+        if inst.lower()=='sinistro':
             txt += "from LCO-1m-"
-        elif inst=='muscat2':
+        elif inst.lower()=='muscat2':
             txt += "from TCS-1.52m-"
-        elif inst=='muscat3':
+        elif inst.lower()=='muscat3':
             txt += "from FTN-2m-"
-        elif inst=='muscat4':
+        elif inst.lower()=='muscat4':
             txt += "from FTS-2m-"
         txt += f"{self.inst} in {','.join(self.bands)}\n\n"
         txt += f"We observed a full/ingress/egress on 20{self.date} UT in {','.join(self.bands)} "
