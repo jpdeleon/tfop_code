@@ -35,6 +35,7 @@ from multiprocessing import Pool
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator
+import matplotlib.patches as mpatches
 import pandas as pd
 from scipy.optimize import minimize
 from scipy import stats
@@ -1443,8 +1444,8 @@ class LPF:
         ref_obj_file_path: str,
         target_ID : int = None,
         target_color: str = "red",
-        cIDs: list = None,
-        cIDs_color: str = "blue",
+        best_cIDs: list = None,
+        cIDs_color: str = "yellow",
         cmap: str = "gray_r",
         contrast: float = 0.1,
         text_offset: tuple = (0, 0),
@@ -1453,9 +1454,9 @@ class LPF:
         title_height: float = 0.95,
         font_size: float = 20,
         show_scale_bar: bool = True,
-        marker_color: str = "yellow",
+        marker_color: str = "green",
         scale_color: str = "white",
-        figsize: tuple = (8, 8),
+        figsize: tuple = (10, 10),
         show_grid: bool = True,
         save: bool = False,
         suffix: str = "pdf",
@@ -1470,13 +1471,7 @@ class LPF:
         wcs = WCS(header)
 
         columns = "id x y xpin ypix flux bkg".split()
-        df = pd.read_csv(
-            ref_obj_file_path,
-            comment="#",
-            names=columns,
-            delim_whitespace=True,
-        )
-        self.ref_obj_from_afphot = df
+        df = self.get_obj_from_afphot(ref_obj_file_path)
         star_ids = df["id"].values
         refxy = df[["x", "y"]].values
         coords = wcs.all_pix2world(refxy, 0)
@@ -1502,8 +1497,8 @@ class LPF:
             j = int(star_ids[i])
             mcolor = marker_color
             lw = 2
-            if cIDs:
-                cIDs = [int(c) for c in cIDs]
+            if best_cIDs:
+                cIDs = [int(c) for c in best_cIDs]
                 if j in cIDs:
                     mcolor = cIDs_color
             if target_ID:
@@ -1553,6 +1548,15 @@ class LPF:
             savefig(fig, outfile, dpi=300, writepdf=False)
         return fig
 
+    def get_obj_from_afphot(self, ref_obj_file_path):
+        df = pd.read_csv(
+            ref_obj_file_path,
+            comment="#",
+            names="id x y xpin ypix flux bkg".split(),
+            delim_whitespace=True,
+        )
+        return df
+    
     def plot_fov_zoom(
         self,
         ref_fits_file_path: str,
@@ -1593,13 +1597,7 @@ class LPF:
             else title
         )
 
-        columns = "id x y xpin ypix flux bkg".split()
-        df = pd.read_csv(
-            ref_obj_file_path,
-            comment="#",
-            names=columns,
-            delim_whitespace=True,
-        )
+        df = self.get_obj_from_afphot(ref_obj_file_path)
         star_ids = df["id"].values
         refxy = df[["x", "y"]].values
         coords = wcs.all_pix2world(refxy, 0)
@@ -1690,7 +1688,7 @@ class LPF:
         title_height: float = 0.95,
         figsize: tuple = (8, 8),
         title: str = None,
-        marker_color: str = "yellow",
+        marker_color: str = "green",
         scale_color: str = "w",
         cmap: str = "gray_r",
         contrast: float = 0.1,
@@ -1790,8 +1788,13 @@ class LPF:
     def plot_fov_simbad(
         self,
         ref_fits_file_path: str,
+        ref_obj_file_path: str,
         fov_simbad_arcsec : float = None,
+        target_ID: int = None,
         target_color: str = "white",
+        best_cIDs: list = None,
+        cIDs_color: str = "yellow",
+        marker_color: str = "green",
         cmap: str = "gray_r",
         cmap_marker: str = "hsv",
         contrast: float = 0.1,
@@ -1800,7 +1803,7 @@ class LPF:
         title: str = None,
         title_height: float = 0.95,
         font_size: float = 20,
-        figsize: tuple = (8, 8),
+        figsize: tuple = (10, 10),
         save: bool = False,
         show_grid: bool = True,
         suffix: str = "pdf",
@@ -1808,6 +1811,15 @@ class LPF:
         """
         Simbad object types within Field of View
         """
+        labels = ['cIDs']
+        mcolors = [marker_color]
+        if best_cIDs:
+            labels.append('best cIDs')
+            mcolors.append(cIDs_color)
+        if target_ID:
+            labels.append('target')
+            mcolors.append(target_color)
+            
         dr, dd = text_offset
 
         header = fits.getheader(ref_fits_file_path)
@@ -1843,6 +1855,44 @@ class LPF:
         )
         ax.add_patch(c)
 
+        df = self.get_obj_from_afphot(ref_obj_file_path)
+        star_ids = df["id"].values
+        refxy = df[["x", "y"]].values
+        obj_coords = wcs.all_pix2world(refxy, 0)
+        rad_marker = phot_aper_pix * pixscale
+        target_ra = self.target_coord.ra.deg
+        target_dec = self.target_coord.dec.deg
+        for i, (r, d) in enumerate(obj_coords):
+            j = int(star_ids[i])
+            mcolor = marker_color
+            lw = 2
+            if best_cIDs:
+                cIDs = [int(c) for c in best_cIDs]
+                if j in cIDs:
+                    mcolor = cIDs_color
+            if target_ID:
+                if j==int(target_ID):
+                    mcolor = target_color
+                    lw = 3
+            c = SphericalCircle(
+                (r * u.deg, d * u.deg),
+                rad_marker * u.arcsec,
+                edgecolor=mcolor,
+                facecolor="none",
+                lw=lw,
+                transform=ax.get_transform("fk5"),
+            )
+            ax.add_patch(c)
+            ax.text(
+                r - dr,
+                d - dd,
+                str(j),
+                fontsize=20,
+                color=mcolor,
+                transform=ax.get_transform("fk5"),
+            )
+            
+        # superpose simbad sources
         simbad_data = self.get_simbad_data(fov_arcsec=fov_simbad_arcsec)
         otypes = list(simbad_data['OTYPE'].unique())
         color_map = plt.get_cmap(cmap_marker)
@@ -1876,6 +1926,10 @@ class LPF:
         fig.suptitle(title, y=title_height, fontsize=font_size)
         ax.set_ylabel("Dec")
         ax.set_xlabel("RA")
+        # add legend
+        patches = [mpatches.Patch(color=mc, label=lbl) for mc,lbl in zip(mcolors,labels)]
+        plt.legend(handles=patches, bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
+
         if show_grid:
             ax.grid()
         fig.tight_layout()
@@ -1891,14 +1945,24 @@ class LPF:
         """
         Simbad.add_votable_fields("otype")
         
-        fov_inst = fovs[self.inst.lower()]*60
+        inst = self.inst.lower()
+        if self.inst.lower()=='sinistro':
+            inst += '_2x2'
+        fov_inst = fovs[inst]*60
         fov = fov_arcsec if fov_arcsec else fov_inst
+        msg = f'Querying Simbad sources {fov}" around {self.name}: '
+        # FIXME: should we query around the center of FOV?
+        msg += f"({self.target_coord.ra.deg:.4f}, {self.target_coord.dec.deg:.4f}) deg."
+        print(msg)        
+        
         if hasattr(self, 'simbad_data'):
             df = self.simbad_data
         else:
             df = Simbad.query_region(self.target_coord, 
                                      radius=fov*u.arcsec).to_pandas()
             self.simbad_data = df
+            url = "https://simbad.cds.unistra.fr/Pages/guide/otypes.htx"
+            print(f"See Simbad object types: {url}")
         # limit
         coords = SkyCoord(ra=df.RA, dec=df.DEC, 
                           unit=(u.hourangle,u.degree))
