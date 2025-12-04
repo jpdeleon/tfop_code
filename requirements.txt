@@ -10,7 +10,7 @@ arviz
 celerite
 ldtk
 numpy
-aesthetic
+#aesthetic
 tqdm
 emcee
 corner

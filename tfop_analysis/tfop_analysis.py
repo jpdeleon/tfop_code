@@ -47,7 +47,7 @@ from astropy.visualization.wcsaxes import SphericalCircle  # , add_scalebar
 from astropy.coordinates import SkyCoord
 from astroquery.mast import Catalogs
 from astroquery.simbad import Simbad
-from aesthetic.plot import savefig
+#from aesthetic.plot import savefig
 import emcee
 import corner
 import seaborn as sb
@@ -85,24 +85,29 @@ PRIOR_K_MIN = 0.001
 PRIOR_K_MAX = 1.0
 
 # bandpasses in increasing wavelength
+# see sinistro filters: https://lco.global/observatory/instruments/filters/
 filter_widths = {
+    "V": (450, 640),
+    "I": (700, 1200),
     "g": (430, 540),
     "r": (560, 700),
     "i": (700, 820),
     "z": (830, 910),
     "g-narrow": (489.5, 540.5), #515 / 51
-    "Na_D": (586, 592.2), #589.1 / 6.2
+    "NaD": (586, 592.2), #589.1 / 6.2
     "i-narrow": (776, 808), #792 / 32
     "z-narrow": (846.5, 889.5), #868 / 43
 } 
 bands = list(filter_widths.keys())
 colors = {
+    "V": "g",
+    "I": "y",
     "g": "blue",
     "r": "green",
     "i": "darkorange",
     "z": "red",
     "g-narrow": "blue",
-    "Na_D": "green",
+    "NaD": "green",
     "i-narrow": "darkorange",
     "z-narrow": "red",
 }
@@ -162,7 +167,7 @@ class LPF:
         )
         if not Path(self.outdir).exists():
             Path(self.outdir).mkdir()
-        self.outfile_prefix = f"{self.outdir}/{self.ticid}{self.alias}_20{self.date}_{self.inst}"
+        self.outfile_prefix = f"{self.outdir}/TIC{self.ticid}{self.alias}_20{self.date}_{self.inst}"
         self._mcmc_samples = None
 
     def _validate_inputs(self):
@@ -193,8 +198,13 @@ class LPF:
         assert (np.array(self.planet_params["rprs"]) < 1).all(), "Check `rprs`"
         assert self.planet_params["a_Rs"][0] > 1, "`a/Rs` is <1?"
 
-        errmsg = f"{self.covariate} not in {self.data[b].columns}"
-        assert self.covariate in self.data[b].columns, errmsg
+        if isinstance(self.covariate, list):
+            for i in self.covariate:
+                errmsg = f"{i} not in {self.data[b].columns}"
+                assert i in self.data[b].columns, errmsg
+        else:
+            errmsg = f"{self.covariate} not in {self.data[b].columns}"
+            assert self.covariate in self.data[b].columns, errmsg
 
         if np.all([self.mask_start, self.mask_end]):
             errmsg = f"{self.mask_start} is too early. Try {self.obs_start}"
@@ -384,19 +394,21 @@ class LPF:
             )
         return chi2
 
-    def optimize_chi2_linear_baseline(self, p0=None, repeat=1):
+    def optimize_chi2_linear_baseline(self, p0=None, method="L-BFGS-B", maxiter=1000):
         """
         p0 : list
             parameter vector
         """
         p0 = list(self.lin_model_offsets.values()) if p0 is None else p0
         assert len(p0) == self.nband
-        for i in range(repeat):
-            p = p0 if i == 0 else res_lin.x
-            res_lin = minimize(
-                self.get_chi2_linear_baseline, p, method="Nelder-Mead"
-            )
-            print(res_lin.fun, res_lin.success, res_lin.x)
+        res_lin = minimize(
+            self.get_chi2_linear_baseline,
+            p0,
+            method=method,
+            #bounds=bounds,
+            options={"maxiter": maxiter, "disp": False},
+        )
+        print(res_lin.fun, res_lin.success, res_lin.x)
 
         npar_lin = len(res_lin.x)
         # print('npar(linear) = ', npar_lin)
@@ -472,6 +484,8 @@ class LPF:
                 if self.DEBUG:
                     print(f"Error (imp): 0<{imp:.2f}<1")
                 return np.inf
+            # if (tc>self.obs_end) or (tc<self.obs_start):
+            #     return np.inf
 
         # derived
         inc = np.arccos(imp / a_Rs)
@@ -523,8 +537,8 @@ class LPF:
                 print(f"model={model}")
                 print(f"chi2 ({b}): {chi2}")
         # add normal priors
-        if tc > 0.:
-            chi2 += ((tc - self.tc[0])/self.tc[1])**2
+        # if tc > 0.:
+        #     chi2 += ((tc - self.tc[0])/self.tc[1])**2
         a_Rs0 = self.planet_params['a_Rs']
         if a_Rs > 0.:
             chi2 += ((a_Rs - a_Rs0[0])/a_Rs0[1])**2
@@ -539,7 +553,7 @@ class LPF:
         raise NotImplementedError("unstable")
         return -np.log(self.get_chi2_transit(pv))
 
-    def optimize_chi2_transit(self, p0, method="Nelder-Mead"):
+    def optimize_chi2_transit(self, p0, method="L-BFGS-B", maxiter=1000, bounds=None):
         """
         Optimize parameters using `scipy.minimize`
         Uses previous optimized parameters if run again
@@ -550,7 +564,14 @@ class LPF:
             assert len(p0) == self.ndim
             pv = p0
 
-        self.opt_result = minimize(self.get_chi2_transit, pv, method=method)
+        self.opt_result = minimize(
+            self.get_chi2_transit,
+            pv,
+            method=method,
+            bounds=bounds,
+            options={"maxiter": maxiter, "disp": False},
+        )
+
         if self.opt_result.success:
             print("Optimization successful!")
             print("---------------------")
@@ -929,7 +950,7 @@ class LPF:
         See also `plot_detrended_data_and_transit()`
         """
         title = (
-            f"{self.name}{self.alias} (TIC{self.ticid}{self.alias})"
+            f"{self.name}{self.alias} (TIC {self.ticid}{self.alias})"
             if title is None
             else title
         )
@@ -1014,7 +1035,7 @@ class LPF:
         font_size: float = 12,
         nsigma: float = 3,
         save: bool = False,
-        suffix: str = "pdf",
+        suffix: str = ".pdf",
     ):
         """
         plot Rp/Rs, Tc and impact parameter posteriors
@@ -1023,7 +1044,7 @@ class LPF:
         if not self.model == "chromatic":
             raise ValueError(errmsg)
         title = (
-            f"{self.name}{self.alias} (TIC{self.ticid}{self.alias})"
+            f"{self.name}{self.alias} (TIC {self.ticid}{self.alias})"
             if title is None
             else title
         )
@@ -1128,7 +1149,7 @@ class LPF:
             outfile_prefix = self.outfile_prefix+f"_{''.join(self.bands)}_{self.model}"
             outfile = f"{outfile_prefix}_posteriors"
             outfile += suffix if self.mask_start is None else f"_mask.{suffix}"
-            savefig(fig, outfile, dpi=300, writepdf=False)
+            fig.savefig(outfile, dpi=300)
         return fig
 
     def plot_kde(self, vals, ax=None, color="C0", label="", fill=True, alpha=0.5):
@@ -1154,7 +1175,7 @@ class LPF:
             figsize: tuple = (16, 12),
             binsize: float = 600 / 86400,
             save: bool = False,
-            suffix: str = "pdf",
+            suffix: str = ".pdf",
         ):
             ymin1, ymax1 = ylims_top
             ymin2, ymax2 = ylims_bottom
@@ -1302,7 +1323,7 @@ class LPF:
                     ax1.tick_params(labelsize=16)
                     ax2.tick_params(labelsize=16)
                     target_name = (
-                        f"{self.name}{self.alias} (TIC{self.ticid}{self.alias})"
+                        f"{self.name}{self.alias} (TIC {self.ticid}{self.alias})"
                         if title is None
                         else title
                     )
@@ -1354,8 +1375,8 @@ class LPF:
             if save:
                 outfile_prefix = self.outfile_prefix+f"_{''.join(self.bands)}_{self.model}"
                 outfile = f"{outfile_prefix}_transit_fit"
-                outfile += suffix if self.mask_start is None else f"_mask.{suffix}"
-                savefig(fig, outfile, dpi=300, writepdf=False)
+                outfile += suffix if self.mask_start is None else f"_mask{suffix}"
+                fig.savefig(outfile, dpi=300)
             return fig
 
     def plot_radii(
@@ -1460,6 +1481,7 @@ class LPF:
         show_grid: bool = True,
         save: bool = False,
         suffix: str = "pdf",
+        wcs : WCS = None
     ):
         """
         Field of View given reference image produced by AFPHOT pipeline
@@ -1468,7 +1490,7 @@ class LPF:
 
         header = fits.getheader(ref_fits_file_path)
         data = fits.getdata(ref_fits_file_path)
-        wcs = WCS(header)
+        wcs = WCS(header) if wcs is None else wcs
 
         columns = "id x y xpin ypix flux bkg".split()
         df = self.get_obj_from_afphot(ref_obj_file_path)
@@ -1545,7 +1567,7 @@ class LPF:
         fig.tight_layout()
         if save:
             outfile = f"{self.outfile_prefix}_{band[0]}_FOV.{suffix}"
-            savefig(fig, outfile, dpi=300, writepdf=False)
+            fig.savefig(outfile, dpi=300)
         return fig
 
     def get_obj_from_afphot(self, ref_obj_file_path):
@@ -1579,6 +1601,7 @@ class LPF:
         show_grid: bool = True,
         save: bool = False,
         suffix: str = "pdf",
+        wcs : WCS = None
     ):
         """
         Zoomed-in FOV
@@ -1587,7 +1610,7 @@ class LPF:
 
         header = fits.getheader(ref_fits_file_path)
         data = fits.getdata(ref_fits_file_path)
-        wcs = WCS(header)
+        wcs = WCS(header) if wcs is None else wcs
 
         pixscale = header["PIXSCALE"]
         band = header["FILTER"]
@@ -1673,7 +1696,7 @@ class LPF:
         fig.tight_layout()
         if save:
             outfile = f"{self.outfile_prefix}_{band[0]}_FOV_zoom.{suffix}"
-            savefig(fig, outfile, dpi=300, writepdf=False)
+            fig.savefig(outfile, dpi=300)
         return fig
 
     def plot_gaia_sources(
@@ -1782,7 +1805,7 @@ class LPF:
         fig.tight_layout()
         if save:
             outfile = f"{self.outfile_prefix}_gaia_sources.{suffix}"
-            savefig(fig, outfile, dpi=300, writepdf=False)
+            fig.savefig(outfile, dpi=300)
         return fig
     
     def plot_fov_simbad(
@@ -1935,7 +1958,7 @@ class LPF:
         fig.tight_layout()
         if save:
             outfile = f"{self.outfile_prefix}_{band[0]}_FOV_simbad.{suffix}"
-            savefig(fig, outfile, dpi=300, writepdf=False)
+            fig.savefig(outfile, dpi=300)
         return fig
     
     def get_simbad_data(self, fov_arcsec=None):
@@ -1969,14 +1992,37 @@ class LPF:
         idx = coords.separation(self.target_coord)<fov*u.arcsec
         return df[idx]
 
-    def get_report(self, mcmc_samples_fp=None) -> str:
+    def get_report(self, mcmc_samples_fp=None, save: bool=False) -> str:
         """
         Show report using print(get_report())
+
+        SAMPLE TEMPLATE
+        MuSCAT report: TIC147034452.01 (TOI 2758.01) on UT 2025.11.14
+
+        Target: 5
+        Reference star(s): [2,4,8]
+        Target aperture: 5 arcsec
+        Reference aperture(s): [5, 5, 9] arcsec
+        Note: All passbands have the same aperture for each star.
+
+        Typical FWHM: NA
+        Predicted Tc: 10994.264091 ± 0.002695 (+2450000) BJD_TDB
+        Measured Tc: 10994.263539 ± 0.000233 (+2450000) BJD_TDB
+        Tc offset: 0.8-min early (0.2 sigma)
+        [Rp/Rs]^2: 17.6,21.9,22.0
+        NEBcheck stars NOT cleared: NA
+
+        Report:
+        The MuSCAT team observed an egress on 2025-11-14 UT in g,r,z_s and detected an ~on-time, 
+        [Rp/Rs]^2: 17.6,21.9,22.0 ppt event using 14 pix = 5" uncontaminated target aperture. 
+        The depths do not show strong chromaticity.
         """
         inst = self.inst.lower()
-        txt = f"Title: TIC {self.ticid}{self.alias} ({self.toi_name}) on UT 20{self.date} "
+        txt = f"Title: TIC {self.ticid}{self.alias} (TOI-{self.toi_name}) on UT 20{self.date} "
         if inst.lower()=='sinistro':
             txt += "from LCO-1m-"
+        elif inst.lower()=='muscat':
+            txt += "from OAO-1.88m-"
         elif inst.lower()=='muscat2':
             txt += "from TCS-1.52m-"
         elif inst.lower()=='muscat3':
@@ -2014,6 +2060,8 @@ class LPF:
             txt += f"Predicted Tc: {tc0[0]+self.time_offset-dt:.6f} ± {tc0[1]:.6f} (+{dt}) BJD_TDB\n"
             txt += f"Measured Tc: {tc-dt:.6f} ± {tc_sig:.6f} (+{dt}) BJD_TDB\n"
             txt += "NEBcheck stars NOT cleared: NEBs not checked"
+            if save:
+                raise NotImplementedError
         except Exception as e:
             print(e)
         return txt
